@@ -6,71 +6,61 @@ RAG Knowledge Engine
 
 ## Current Phase
 
-Phase 0 — Foundation
+Phase 1 — Document Management
 
 ## Current Status
 
-IN PROGRESS
+COMPLETE
 
 ---
 
-## Phase 0 Checklist
+## Completed
 
-### Project Setup
+### Phase 0
+- [x] Django
+- [x] PostgreSQL
+- [x] Qdrant
+- [x] Docker Compose
+- [x] Environment configuration
+- [x] Health check
+- [x] Git repository
 
-- [x] Git repository initialized
-- [x] Python virtual environment created
-- [x] Django installed
-- [x] Django REST Framework installed
-- [x] PostgreSQL driver installed
-- [x] Qdrant client installed
-
-### Infrastructure
-
-- [x] Docker Compose created
-- [x] PostgreSQL container running
-- [x] Qdrant container running
-- [ ] PostgreSQL connection verified from Django
-- [ ] Qdrant connection verified from Django
-
-### Django
-
-- [x] Django project created
-- [x] Core app created
-- [ ] PostgreSQL migrations completed
-- [ ] Health endpoint created
-- [ ] Health endpoint verified
-
-### Configuration
-
-- [x] .env created
-- [x] .gitignore created
-- [ ] Production configuration considered
-
-### Documentation
-
-- [x] PROJECT_STATUS.md
-- [ ] ROADMAP.md
-- [ ] DECISIONS.md
+### Phase 1
+- [x] Document model
+- [x] File upload
+- [x] PDF support
+- [x] TXT support
+- [x] Markdown support
+- [x] File type validation
+- [x] File size validation
+- [x] Document listing
+- [x] Document detail
+- [x] Document deletion
+- [x] Physical file deletion
+- [x] Django admin
+- [x] API tests
 
 ---
 
-## Current Task
+## Current Milestone
 
-Complete and verify Phase 0 infrastructure.
+v0.1 — Document Management
+
+## Next Phase
+
+Phase 2 — Document Ingestion
 
 ## Next Task
 
-Phase 1 — Document Management
+Implement document parsing and text extraction.
 
----
+## Explicitly Not Implemented Yet
 
-## Blockers
-
-None
-
----
-
-## Last Updated
-
-2026-09-27
+- [ ] PDF text extraction
+- [ ] Document chunking
+- [ ] Embeddings
+- [ ] Qdrant indexing
+- [ ] Retrieval
+- [ ] LLM generation
+- [ ] Redis
+- [ ] Agentic RAG
