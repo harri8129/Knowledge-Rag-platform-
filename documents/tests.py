@@ -1,10 +1,12 @@
+from documents.admin import DocumentAdmin
+from django.http import response
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Document
+from documents.models import Document, DocumentPage, DocumentStatus
 
 
 class DocumentAPITests(APITestCase):
@@ -174,4 +176,124 @@ class DocumentAPITests(APITestCase):
         self.assertEqual(
             Document.objects.count(),
             0,
+        )
+
+
+class DocumentIngestionTests(APITestCase):
+
+    def upload_text_file(self,name="sample.txt",content=None):
+        if content is None:
+            content = b"This is a test document for RAG."
+
+        file = SimpleUploadedFile(
+            name,
+            content,
+            content_type="text/plain",
+        )
+
+        return self.client.post(
+            "/api/documents/",
+            {"file": file,},
+            format="multipart",
+        )
+
+    def test_upload_document_starts_as_uploaded(self):
+        response = self.upload_text_file()
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["status"], "UPLOADED")
+        self.assertEqual(response.data["title"], "sample")
+
+    def test_process_text_document(self):
+        response = self.upload_text_file()
+
+        document_id = response.data["id"]
+
+        process_response = self.client.post(
+            f"/api/documents/{document_id}/process/"
+        )
+
+        self.assertEqual(
+            process_response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        self.assertEqual(
+            process_response.data["status"],
+            DocumentStatus.READY,
+        )
+        self.assertEqual(
+            process_response.data["page_count"],
+            1,
+        )
+
+        page = DocumentPage.objects.get(document_id=document_id,page_number=1)
+        self.assertEqual(
+            page.content,
+            "This is a test document for RAG.",
+        )
+
+    def test_get_extracted_pages(self):
+        response = self.upload_text_file()
+        document_id = response.data["id"]
+
+        self.client.post(
+            f"/api/documents/{document_id}/process/"
+        )
+
+        pages_response = self.client.get(
+            f"/api/documents/{document_id}/pages/"
+        )
+
+        self.assertEqual(pages_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(pages_response.data), 1)
+        self.assertEqual(
+            pages_response.data[0]["content"],
+            "This is a test document for RAG.",
+        )
+
+    def test_processing_invalid_pdf_marks_failed(self):
+        file = SimpleUploadedFile(
+            "broken.pdf",
+            b"not a valid pdf",
+            content_type="application/pdf",
+        )
+
+        upload_response = self.client.post(
+            "/api/documents/",
+            {"file": file},
+            format="multipart",
+        )
+
+        document_id = upload_response.data["id"]
+
+        process_response = self.client.post(
+            f"/api/documents/{document_id}/process/"
+        )
+
+        self.assertEqual(
+            process_response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        document = Document.objects.get(id=document_id)
+        self.assertEqual(document.status, DocumentStatus.FAILED)
+        self.assertTrue(document.processing_error)
+
+    def test_reprocess_document_replaces_pages(self):
+        response = self.upload_text_file()
+        document_id = response.data["id"]
+
+        self.client.post(
+            f"/api/documents/{document_id}/process/"
+        )
+        self.client.post(
+            f"/api/documents/{document_id}/process/"
+        )
+
+        self.assertEqual(
+            DocumentPage.objects.filter(
+                document_id=document_id
+            ).count(),
+            1,
         )

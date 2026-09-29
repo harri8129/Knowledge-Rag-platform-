@@ -1,15 +1,14 @@
 from pathlib import Path 
 from rest_framework import serializers
 
-from .models import Document
+from .models import Document,DocumentPage
 
 
-
-ALLOWED_EXTENSIONS = {
-    ".pdf": "pdf",
-    ".txt": "txt",
-    ".md": "markdown",
-}
+# ALLOWED_EXTENSIONS = {
+#     ".pdf": "pdf",
+#     ".txt": "txt",
+#     ".md": "markdown",
+# }
 
 class DocumentSerializer(serializers.ModelSerializer):
 
@@ -28,6 +27,8 @@ class DocumentSerializer(serializers.ModelSerializer):
             "file",
             "file_type",
             "status",
+            "page_count",
+            "processing_error",
             "created_at",
             "updated_at",
         ]
@@ -36,17 +37,25 @@ class DocumentSerializer(serializers.ModelSerializer):
             "id",
             "file_type",
             "status",
+            "page_count",
+            "processing_error",
             "created_at",
             "updated_at",
         ]
 
-    def validate_file(self,file):
+    def validate_file(self,value):
 
-        extension = Path(file.name).suffix.lower()
+        allowed_types = {
+            ".pdf": "pdf",
+            ".txt": "txt",
+            ".md": "markdown",
+        }
 
-        if extension not in ALLOWED_EXTENSIONS:
+        extension = Path(value.name).suffix.lower()
 
-            allowed = ", ".join(ALLOWED_EXTENSIONS.keys())
+        if extension not in allowed_types:
+
+            allowed = ", ".join(allowed_types.keys())
 
             raise serializers.ValidationError(
                 f"Unsupported file type. Allowed types: {allowed}"
@@ -54,24 +63,41 @@ class DocumentSerializer(serializers.ModelSerializer):
 
         max_size = 20 * 1024 * 1024 # 20MB in bytes 
 
-        if file.size > max_size:
+        if value.size > max_size:
             raise serializers.ValidationError(
                 "File is too large. Maximum file size is 20MB."
             )   
 
-        return file 
+        return value 
 
     def create(self,validated_data):
+        uploaded_file = validated_data["file"]
 
-        file = validated_data["file"]
-        extension = Path(file.name).suffix.lower()
+        extension = Path(uploaded_file.name).suffix.lower()
 
-        validated_data["file_type"] = ALLOWED_EXTENSIONS[extension]
+        file_types = {
+            ".pdf": "pdf",
+            ".txt": "txt",
+            ".md": "markdown",
+        }
 
-        if not validated_data.get("title"):
+        validated_data["file_type"] = file_types[extension]
+
+        if not validated_data.get("title","").strip():
             validated_data["title"] = Path(
-                file.name
+                uploaded_file.name
             ).stem
         
         return super().create(validated_data)
 
+class DocumentPageSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = DocumentPage
+        fields = [
+            "id",
+            "document",
+            "page_number",
+            "content",
+        ]
+        read_only_fields = fields
