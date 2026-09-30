@@ -1,14 +1,8 @@
 from pathlib import Path 
 from rest_framework import serializers
 
-from .models import Document,DocumentPage
+from .models import Document,DocumentPage,DocumentChunk
 
-
-# ALLOWED_EXTENSIONS = {
-#     ".pdf": "pdf",
-#     ".txt": "txt",
-#     ".md": "markdown",
-# }
 
 class DocumentSerializer(serializers.ModelSerializer):
 
@@ -99,5 +93,26 @@ class DocumentPageSerializer(serializers.ModelSerializer):
             "document",
             "page_number",
             "content",
+        ]
+        read_only_fields = fields
+
+class DocumentChunkSerializer(serializers.ModelSerializer):
+    page_number = serializers.IntegerField(
+        source="source_page.page_number",
+        read_only=True,
+    )
+
+    class Meta:
+        model = DocumentChunk
+        fields = [
+            "id",
+            "document",
+            "source_page",
+            "page_number",
+            "chunk_index",
+            "content",
+            "start_offset",
+            "end_offset",
+            "created_at",
         ]
         read_only_fields = fields

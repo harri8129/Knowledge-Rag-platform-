@@ -46,7 +46,11 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
 
+    # Third-party apps
     "rest_framework",
+    "drf_spectacular",
+
+    # Local apps
     "core",
     "documents",
 ]
@@ -139,6 +143,22 @@ MAILERS = {
     'default': {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
     },
+}
+
+REST_FRAMEWORK = {
+    "DEFAULT_SCHEMA_CLASS": (
+        "drf_spectacular.openapi.AutoSchema"
+    ),
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "RAG Knowledge Engine API",
+    "DESCRIPTION": (
+        "API documentation for the RAG Knowledge Engine. "
+        "Includes document management and ingestion."
+    ),
+    "VERSION": "0.2.0",
+    "SERVE_INCLUDE_SCHEMA": False,
 }
 
 MEDIA_URL = "/media/"

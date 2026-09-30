@@ -8,6 +8,12 @@ class DocumentStatus(models.TextChoices):
     READY = "READY","Ready"
     FAILED = "FAILED","Failed"
 
+class ChunkingStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    PROCESSING = "processing", "Processing"
+    READY = "ready", "Ready"
+    FAILED = "failed", "Failed"
+
 class Document(models.Model):
     title = models.CharField(max_length=255)
     file = models.FileField(upload_to="documents/")
@@ -19,6 +25,9 @@ class Document(models.Model):
     )
     page_count = models.PositiveIntegerField(default=0)
     processing_error = models.TextField(blank=True, default="")
+    chunking_status = models.CharField(max_length=20,choices=ChunkingStatus.choices,default=ChunkingStatus.PENDING)
+    chunk_count = models.PositiveIntegerField(default=0)
+    chunking_error = models.TextField(blank=True,default="")
     created_at = models.DateTimeField(auto_now_add=True,)
     updated_at = models.DateTimeField(auto_now=True,)
 
@@ -60,3 +69,34 @@ class DocumentPage(models.Model):
 
     def __str__(self):
         return f"{self.document.title} - Page {self.page_number}"
+
+
+
+class DocumentChunk(models.Model):
+    document = models.ForeignKey(
+        "documents.Document",
+        on_delete=models.CASCADE,
+        related_name="chunks",
+    )
+    source_page = models.ForeignKey(
+        "documents.DocumentPage",
+        on_delete=models.CASCADE,
+        related_name="chunks",
+    )
+    chunk_index = models.PositiveIntegerField()
+    content = models.TextField()
+    start_offset = models.PositiveIntegerField()
+    end_offset = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["chunk_index"]
+        constraints = [
+            models.UniqueConstraint(
+                fields = ["document", "chunk_index"],
+                name = "unique_document_chunk_index",
+            ),
+        ]    
+
+    def __str__(self):
+        return f"{self.document.title} - Chunk {self.chunk_index}"
