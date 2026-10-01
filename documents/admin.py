@@ -20,6 +20,8 @@ class DocumentAdmin(admin.ModelAdmin):
         "page_count",
         "chunking_status",
         "chunk_count",
+        "indexing_status",
+        "indexed_chunk_count",
         "created_at",
     ]
     list_filter = [
@@ -36,6 +38,9 @@ class DocumentAdmin(admin.ModelAdmin):
         "chunking_status",
         "chunk_count",
         "chunking_error",
+        "indexing_status",
+        "indexed_chunk_count",
+        "indexing_error",
         "created_at",
         "updated_at",
     ]

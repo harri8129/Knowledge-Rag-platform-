@@ -23,6 +23,9 @@ class DocumentSerializer(serializers.ModelSerializer):
             "status",
             "page_count",
             "processing_error",
+            "indexing_status",
+            "indexed_chunk_count",
+            "indexing_error",
             "created_at",
             "updated_at",
         ]
@@ -33,6 +36,9 @@ class DocumentSerializer(serializers.ModelSerializer):
             "status",
             "page_count",
             "processing_error",
+            "indexing_status",
+            "indexed_chunk_count",
+            "indexing_error",
             "created_at",
             "updated_at",
         ]

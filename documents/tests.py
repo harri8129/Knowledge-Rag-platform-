@@ -1,3 +1,6 @@
+from documents.services.indexing import process_document_indexing
+from httpx import patch
+from documents.models import IndexingStatus
 from documents.services.chunking import split_text
 from documents.models import ChunkingStatus
 from documents.models import DocumentChunk
@@ -5,6 +8,7 @@ from documents.admin import DocumentAdmin
 from django.http import response
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
+from unittest.mock import patch, MagicMock
 
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -469,3 +473,144 @@ class DocumentChunkAPITests(APITestCase):
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(second_response.status_code, 200)
         self.assertEqual(first_count, second_count)
+
+class DocumentIndexingTests(APITestCase):
+    def create_chunked_document(self):
+        uploaded = SimpleUploadedFile(
+            "index-test.txt",
+            b"Test content for embedding.",
+            content_type="text/plain",
+        )
+
+        document = Document.objects.create(
+            title="Index Test",
+            file=uploaded,
+            file_type="txt",
+            status=DocumentStatus.READY,
+            chunking_status=ChunkingStatus.READY,
+            chunk_count=2,
+        )
+
+        page = DocumentPage.objects.create(
+            document=document,
+            page_number=1,
+            content="First chunk. Second chunk.",
+        )
+
+        DocumentChunk.objects.create(
+            document=document,
+            source_page=page,
+            chunk_index=0,
+            content="First chunk.",
+            start_offset=0,
+            end_offset=12,
+        )
+
+        DocumentChunk.objects.create(
+            document=document,
+            source_page=page,
+            chunk_index=1,
+            content="Second chunk.",
+            start_offset=13,
+            end_offset=26,
+        )
+
+        return document
+
+    @patch("documents.services.indexing.get_qdrant_client")
+    @patch("documents.services.indexing.embed_texts")
+    def test_index_document(
+        self,
+        mock_embed_texts,
+        mock_get_client,
+    ):
+        document = self.create_chunked_document()
+
+        client = MagicMock()
+        mock_get_client.return_value = client
+        mock_embed_texts.return_value = [
+            [0.1] * 384,
+            [0.2] * 384,
+        ]
+
+        with patch(
+            "documents.services.indexing.ensure_collection"
+        ) as mock_ensure, patch(
+            "documents.services.indexing.get_document_point_ids",
+            return_value=[],
+        ), patch(
+            "documents.services.indexing.upsert_points"
+        ) as mock_upsert:
+            result = process_document_indexing(document.id)
+
+        result.refresh_from_db()
+
+        self.assertEqual(
+            result.indexing_status,
+            IndexingStatus.READY,
+        )
+        self.assertEqual(result.indexed_chunk_count, 2)
+        mock_ensure.assert_called_once()
+        mock_upsert.assert_called_once()
+        client.close.assert_called_once()
+
+    def test_cannot_index_unchunked_document(self):
+        document = self.create_chunked_document()
+        document.chunking_status = ChunkingStatus.PENDING
+        document.save(update_fields=["chunking_status"])
+
+        with self.assertRaises(ValueError):
+            process_document_indexing(document.id)
+
+    @patch("documents.services.indexing.get_qdrant_client")
+    @patch("documents.services.indexing.embed_texts")
+    def test_failed_indexing_updates_status(
+        self,
+        mock_embed_texts,
+        mock_get_client,
+    ):
+        document = self.create_chunked_document()
+
+        client = MagicMock()
+        mock_get_client.return_value = client
+        mock_embed_texts.side_effect = RuntimeError(
+            "Embedding service unavailable"
+        )
+
+        with patch(
+            "documents.services.indexing.ensure_collection"
+        ), patch(
+            "documents.services.indexing.get_document_point_ids",
+            return_value=[],
+        ):
+            with self.assertRaises(RuntimeError):
+                process_document_indexing(document.id)
+
+        document.refresh_from_db()
+
+        self.assertEqual(
+            document.indexing_status,
+            IndexingStatus.FAILED,
+        )
+        self.assertIn(
+            "Embedding service unavailable",
+            document.indexing_error,
+        )
+        client.close.assert_called_once()
+
+    @patch("documents.views.process_document_indexing")
+    def test_indexing_api(self, mock_process):
+        document = self.create_chunked_document()
+        document.indexing_status = IndexingStatus.READY
+        document.indexed_chunk_count = 2
+        mock_process.return_value = document
+
+        response = self.client.post(
+            f"/api/documents/{document.id}/index/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data["indexing_status"],
+            IndexingStatus.READY,
+        )

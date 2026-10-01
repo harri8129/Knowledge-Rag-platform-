@@ -14,6 +14,7 @@ from documents.serializers import (
     DocumentPageSerializer,
 )
 from documents.services.ingestion import process_document
+from documents.services.indexing import process_document_indexing
 
 
 
@@ -143,3 +144,38 @@ class DocumentChunkListView(generics.ListAPIView):
             .select_related("source_page", "document")
             .order_by("chunk_index")
         )                  
+
+class DocumentIndexView(APIView):
+    def post(self,request,pk):
+        document = get_object_or_404(Document,pk=pk)
+
+        try:
+            document = process_document_indexing(document.id)
+        
+        except ValueError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        except Exception:
+            document.refresh_from_db()
+
+            return Response(
+                {
+                    "detail": "Indexing failed.",
+                    "indexing_status": document.indexing_status,
+                    "indexing_error": document.indexing_error,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )        
+
+        return Response(
+            DocumentSerializer(
+                document,
+                context={
+                    "request":request
+                },
+            ).data,
+            status=status.HTTP_200_OK,
+        )        

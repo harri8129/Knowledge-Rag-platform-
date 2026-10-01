@@ -17,6 +17,28 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") or None
+
+QDRANT_COLLECTION = os.getenv(
+    "QDRANT_COLLECTION",
+    "rag_document_chunks",
+)
+
+EMBEDDING_MODEL = os.getenv(
+    "EMBEDDING_MODEL",
+    "sentence-transformers/all-MiniLM-L6-v2",
+)
+
+EMBEDDING_DIMENSION = int(
+    os.getenv("EMBEDDING_DIMENSION", "384")
+)
+
+EMBEDDING_BATCH_SIZE = int(
+    os.getenv("EMBEDDING_BATCH_SIZE", "32")
+)
+
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -159,6 +181,7 @@ SPECTACULAR_SETTINGS = {
     ),
     "VERSION": "0.2.0",
     "SERVE_INCLUDE_SCHEMA": False,
+    "COMPONENT_SPLIT_REQUEST": True,
 }
 
 MEDIA_URL = "/media/"

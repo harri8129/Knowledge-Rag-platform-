@@ -14,6 +14,12 @@ class ChunkingStatus(models.TextChoices):
     READY = "ready", "Ready"
     FAILED = "failed", "Failed"
 
+class IndexingStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    PROCESSING = "processing", "Processing"
+    READY = "ready", "Ready"
+    FAILED = "failed", "Failed"
+
 class Document(models.Model):
     title = models.CharField(max_length=255)
     file = models.FileField(upload_to="documents/")
@@ -28,6 +34,13 @@ class Document(models.Model):
     chunking_status = models.CharField(max_length=20,choices=ChunkingStatus.choices,default=ChunkingStatus.PENDING)
     chunk_count = models.PositiveIntegerField(default=0)
     chunking_error = models.TextField(blank=True,default="")
+    indexing_status = models.CharField(
+        max_length=20,
+        choices=IndexingStatus.choices,
+        default=IndexingStatus.PENDING,
+    )
+    indexed_chunk_count = models.PositiveIntegerField(default=0)
+    indexing_error = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True,)
     updated_at = models.DateTimeField(auto_now=True,)
 
