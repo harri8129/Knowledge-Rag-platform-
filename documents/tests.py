@@ -1,3 +1,5 @@
+from documents.services.rag import answer_question
+from documents.services.llm import generate_answer
 from django.test import SimpleTestCase
 from documents.services.retrieval import search_similar_chunks
 from documents.services.indexing import process_document_indexing
@@ -824,3 +826,136 @@ class DocumentSearchAPITests(APITestCase):
         )
 
         self.assertEqual(response.status_code, 409)
+
+class GenerateAnswerTests(SimpleTestCase):
+
+    @patch(
+        "documents.services.llm.get_llm_client"
+    )
+    def test_generate_answer(self, mock_get_client):
+
+        mock_response = MagicMock()
+
+        mock_response.choices = [
+            MagicMock(
+                message=MagicMock(
+                    content="The refund period is 30 days."
+                )
+            )
+        ]
+
+        mock_client = MagicMock()
+
+        mock_client.chat.completions.create.return_value = (
+            mock_response
+        )
+
+        mock_get_client.return_value = mock_client
+
+        answer = generate_answer(
+            system_prompt="You are a helpful assistant.",
+            user_prompt="What is the refund period?",
+        )
+
+        self.assertEqual(
+            answer,
+            "The refund period is 30 days.",
+        )
+
+        mock_client.chat.completions.create.assert_called_once()
+
+
+class GenerateAnswerValidationTests(SimpleTestCase):
+
+    def test_empty_system_prompt(self):
+        with self.assertRaises(ValueError):
+            generate_answer(
+                system_prompt="",
+                user_prompt="hello",
+            )
+
+    def test_empty_user_prompt(self):
+        with self.assertRaises(ValueError):
+            generate_answer(
+                system_prompt="system",
+                user_prompt="",
+            )
+
+class RAGServiceTests(SimpleTestCase):
+
+    @patch(
+        "documents.services.rag.generate_answer"
+    )
+    @patch(
+        "documents.services.rag.search_similar_chunks"
+    )
+    def test_answer_question(
+        self,
+        mock_search,
+        mock_generate,
+    ):
+        mock_search.return_value = [
+            {
+                "chunk_id": 10,
+                "document_id": 1,
+                "document_title": "Policy",
+                "page_number": 4,
+                "chunk_index": 2,
+                "content": (
+                    "Refunds are allowed within 30 days."
+                ),
+                "score": 0.91,
+            }
+        ]
+
+        mock_generate.return_value = (
+            "Refunds are allowed within 30 days [S1]."
+        )
+
+        result = answer_question(
+            query="What is the refund policy?"
+        )
+
+        self.assertEqual(       
+            result["query"],
+            "What is the refund policy?",
+        )
+
+        self.assertEqual(
+            result["answer"],
+            "Refunds are allowed within 30 days [S1].",
+        )
+
+        self.assertEqual(
+            len(result["sources"]),
+            1,
+        )
+
+        mock_search.assert_called_once()
+
+        mock_generate.assert_called_once()
+
+    @patch(
+        "documents.services.rag.search_similar_chunks"
+    )
+    def test_no_context(
+        self,
+        mock_search,
+    ):
+        mock_search.return_value = []
+
+        result = answer_question(
+            query="What is the refund policy?"
+        )
+
+        self.assertEqual(
+            result["sources"],
+            [],
+        )
+
+        self.assertIn(
+            "could not find",
+            result["answer"].lower(),
+        )
+
+        

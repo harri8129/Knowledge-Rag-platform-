@@ -38,6 +38,25 @@ EMBEDDING_BATCH_SIZE = int(
     os.getenv("EMBEDDING_BATCH_SIZE", "32")
 )
 
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+OPENROUTER_BASE_URL = os.getenv(
+    "OPENROUTER_BASE_URL",
+    "https://openrouter.ai/api/v1",
+)
+
+OPENROUTER_MODEL = os.getenv(
+    "OPENROUTER_MODEL",
+)
+
+RAG_TOP_K = int(
+    os.getenv("RAG_TOP_K", "5")
+)
+
+RAG_SCORE_THRESHOLD = float(
+    os.getenv("RAG_SCORE_THRESHOLD", "0.30")
+)
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent

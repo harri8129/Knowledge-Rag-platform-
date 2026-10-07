@@ -1,3 +1,5 @@
+from documents.services.rag import answer_question
+from documents.serializers import RAGRequestSerializer
 from drf_spectacular.utils import extend_schema
 from documents.services.chunking_service import process_document_chunks
 from documents.models import DocumentChunk
@@ -18,7 +20,9 @@ from documents.serializers import (
 from documents.services.ingestion import process_document
 from documents.services.indexing import process_document_indexing
 from documents.services.retrieval import search_similar_chunks
+import logging
 
+logger = logging.getLogger(__name__)
 
 class DocumentListCreateView(generics.ListCreateAPIView):
     queryset = Document.objects.all()
@@ -249,5 +253,81 @@ class DocumentSearchView(APIView):
                 "result_count": len(results),
                 "results": results,
             },
+            status=status.HTTP_200_OK,
+        )
+
+class DocumentRAGView(APIView):
+
+    @extend_schema(
+        request=RAGRequestSerializer,
+        description="Perform RAG on indexed documents to answer a query.",
+        responses={200: None},
+    )
+
+    def post(self,request):
+        serializer = RAGRequestSerializer(data=request.data)
+
+        serializer.is_valid(raise_exception=True)
+
+        query = serializer.validated_data["query"]
+        top_k = serializer.validated_data["top_k"]
+        score_threshold = serializer.validated_data["score_threshold"]
+        document_id = serializer.validated_data["document_id"]
+
+       # -----------------------------------------
+       # Optional document-specific validation
+       # -----------------------------------------
+
+        if document_id is not None:
+
+            try:
+                document = Document.objects.get(id=document_id)
+            except Document.DoesNotExist:
+                return Response(
+                    {"detail": "Document not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            
+            if document.indexing_status != "ready":
+                return Response(
+                    {
+                        "detail": (
+                            "Document is not ready for RAG queries."
+                        ),
+                        "indexing_status": document.indexing_status,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+        try:
+            results = answer_question(
+                query=query,
+                top_k=top_k,
+                score_threshold=score_threshold,
+                document_id=document_id,
+            )
+        
+        except ValueError as exc:
+            return Response(
+                {
+                    "detail": str(exc)
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        except Exception as exc:
+
+            logger.exception("RAG generation failure")
+
+            return Response(
+                {
+                    "detail": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            results,
             status=status.HTTP_200_OK,
         )
