@@ -1,3 +1,4 @@
+from documents.views import DocumentSearchView
 from documents.views import DocumentChunkListView,DocumentChunkProcessView,DocumentIndexView
 from django.urls import path
 
@@ -11,4 +12,5 @@ urlpatterns = [
     path("<int:pk>/chunk/",DocumentChunkProcessView.as_view(),name="document-chunk-process",),
     path("<int:pk>/chunks/",DocumentChunkListView.as_view(),name="document-chunk-list",),
     path("<int:pk>/index/",DocumentIndexView.as_view(),name="document-index"),
+    path("search/",DocumentSearchView.as_view(),name="document-search"),
 ]

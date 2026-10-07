@@ -122,3 +122,38 @@ class DocumentChunkSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = fields
+
+class RetrievalRequestSerializer(serializers.Serializer):
+    query = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        trim_whitespace=True,
+        max_length=1000,
+    )
+
+    top_k = serializers.IntegerField(
+        required=False,
+        default=5,
+        min_value=1,
+        max_value=50,
+    )
+
+    score_threshold = serializers.FloatField(
+        required=False,
+        allow_null=True,
+        min_value=0.0,
+        max_value=1.0,
+    )
+
+    document_id = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=1,
+    )
+
+    def validate_query(self, value):
+        if not value.strip():
+            raise serializers.ValidationError(
+                "Query cannot be empty or whitespace"
+            )
+        return value.strip()

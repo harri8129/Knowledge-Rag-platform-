@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema
 from documents.services.chunking_service import process_document_chunks
 from documents.models import DocumentChunk
 from documents.serializers import DocumentChunkSerializer
@@ -8,14 +9,15 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from documents.models import Document, DocumentPage
+from documents.models import Document, DocumentPage, IndexingStatus
 from documents.serializers import (
     DocumentSerializer,
     DocumentPageSerializer,
+    RetrievalRequestSerializer
 )
 from documents.services.ingestion import process_document
 from documents.services.indexing import process_document_indexing
-
+from documents.services.retrieval import search_similar_chunks
 
 
 class DocumentListCreateView(generics.ListCreateAPIView):
@@ -179,3 +181,73 @@ class DocumentIndexView(APIView):
             ).data,
             status=status.HTTP_200_OK,
         )        
+
+class DocumentSearchView(APIView):
+
+    @extend_schema(
+        request=RetrievalRequestSerializer,
+        description="Search indexed documents using semantic similarity.",
+        responses={200: None},
+    )
+
+    def post(self,request):
+        serializer = RetrievalRequestSerializer(data=request.data)
+
+        serializer.is_valid(raise_exception=True)
+
+        data = serializer.validated_data
+
+        document_id = data.get("document_id")
+
+        if document_id is not None:
+
+            try:
+                document = Document.objects.get(id=document_id)
+            except Document.DoesNotExist:
+                return Response(
+                    {"detail": "Document not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            
+            if document.indexing_status != IndexingStatus.READY:
+                return Response(
+                    {"detail": ("Document is not indexed"),
+                     "indexing_status":document.indexing_status, 
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+        
+        try:
+            results = search_similar_chunks(
+                query=data["query"],
+                top_k=data["top_k"],
+                score_threshold=data.get("score_threshold"),
+                document_id=document_id,
+            )
+        except ValueError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as exc:
+            import traceback
+
+            traceback.print_exc()
+
+            return Response(
+                {"detail": "Retrieval failed",
+                "error":str(exc),
+                "type":type(exc).__name__,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        return Response(
+            {
+                "query": data["query"],
+                "top_k": data["top_k"],
+                "result_count": len(results),
+                "results": results,
+            },
+            status=status.HTTP_200_OK,
+        )

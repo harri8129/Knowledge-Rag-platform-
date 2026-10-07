@@ -1,3 +1,5 @@
+from django.test import SimpleTestCase
+from documents.services.retrieval import search_similar_chunks
 from documents.services.indexing import process_document_indexing
 from httpx import patch
 from documents.models import IndexingStatus
@@ -614,3 +616,211 @@ class DocumentIndexingTests(APITestCase):
             response.data["indexing_status"],
             IndexingStatus.READY,
         )
+
+class RetrievalServiceTests(SimpleTestCase):
+
+    @patch("documents.services.retrieval.get_qdrant_client")
+    @patch("documents.services.retrieval.embed_texts")
+    def test_search_returns_formatted_results(
+        self,
+        mock_embed,
+        mock_get_client,
+    ):
+        mock_embed.return_value = [[0.1] * 384]
+
+        client = MagicMock()
+        mock_get_client.return_value = client
+        client.collection_exists.return_value = True
+
+        point = MagicMock()
+        point.id = "point-uuid"
+        point.score = 0.87
+        point.payload = {
+            "chunk_id": 5,
+            "document_id": 2,
+            "document_title": "Architecture",
+            "page_number": 3,
+            "chunk_index": 1,
+            "content": "PostgreSQL stores application data.",
+        }
+
+        client.query_points.return_value = MagicMock(
+            points=[point]
+        )
+
+        results = search_similar_chunks(
+            query="Where is application data stored?",
+            top_k=5,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["chunk_id"], 5)
+        self.assertEqual(results[0]["page_number"], 3)
+        self.assertEqual(results[0]["score"], 0.87)
+        client.close.assert_called_once()
+
+    @patch("documents.services.retrieval.get_qdrant_client")
+    @patch("documents.services.retrieval.embed_texts")
+    def test_search_passes_document_filter(
+        self,
+        mock_embed,
+        mock_get_client,
+    ):
+        mock_embed.return_value = [[0.1] * 384]
+
+        client = MagicMock()
+        mock_get_client.return_value = client
+        client.collection_exists.return_value = True
+        client.query_points.return_value = MagicMock(
+            points=[]
+        )
+
+        results = search_similar_chunks(
+            query="Database configuration",
+            document_id=7,
+        )
+
+        self.assertEqual(results, [])
+
+        kwargs = client.query_points.call_args.kwargs
+        query_filter = kwargs["query_filter"]
+
+        self.assertEqual(
+            query_filter.must[0].key,
+            "document_id",
+        )
+        self.assertEqual(
+            query_filter.must[0].match.value,
+            7,
+        )
+
+    def test_empty_query_raises_error(self):
+        with self.assertRaises(ValueError):
+            search_similar_chunks("  ")
+
+    def test_invalid_top_k_raises_error(self):
+        with self.assertRaises(ValueError):
+            search_similar_chunks("test", top_k=100)
+
+    def test_invalid_score_threshold_raises_error(self):
+        with self.assertRaises(ValueError):
+            search_similar_chunks(
+                "test",
+                score_threshold=1.5,
+            )
+
+    @patch("documents.services.retrieval.get_qdrant_client")
+    @patch("documents.services.retrieval.embed_texts")
+    def test_missing_collection_returns_empty_list(
+        self,
+        mock_embed,
+        mock_get_client,
+    ):
+        mock_embed.return_value = [[0.1] * 384]
+
+        client = MagicMock()
+        mock_get_client.return_value = client
+        client.collection_exists.return_value = False
+
+        results = search_similar_chunks("test query")
+
+        self.assertEqual(results, [])
+        client.query_points.assert_not_called()
+        client.close.assert_called_once()
+
+
+class DocumentSearchAPITests(APITestCase):
+
+    def create_indexed_document(self):
+        file = SimpleUploadedFile(
+            "search-test.txt",
+            b"PostgreSQL is the database.",
+            content_type="text/plain",
+        )
+
+        return Document.objects.create(
+            title="Search Test",
+            file=file,
+            file_type="txt",
+            status=DocumentStatus.READY,
+            chunking_status=ChunkingStatus.READY,
+            indexing_status=IndexingStatus.READY,
+        )
+
+    @patch("documents.views.search_similar_chunks")
+    def test_search_api(self, mock_search):
+        mock_search.return_value = [
+            {
+                "chunk_id": 1,
+                "document_id": 1,
+                "document_title": "Search Test",
+                "page_number": 1,
+                "chunk_index": 0,
+                "content": "PostgreSQL is the database.",
+                "score": 0.9,
+            }
+        ]
+
+        response = self.client.post(
+            "/api/documents/search/",
+            {
+                "query": "Which database is used?",
+                "top_k": 5,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["result_count"], 1)
+        self.assertEqual(
+            response.data["results"][0]["chunk_id"],
+            1,
+        )
+
+    def test_search_requires_query(self):
+        response = self.client.post(
+            "/api/documents/search/",
+            {"top_k": 5},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_search_rejects_invalid_top_k(self):
+        response = self.client.post(
+            "/api/documents/search/",
+            {
+                "query": "test",
+                "top_k": 100,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_search_rejects_unindexed_document(self):
+        file = SimpleUploadedFile(
+            "pending.txt",
+            b"Some content",
+            content_type="text/plain",
+        )
+
+        document = Document.objects.create(
+            title="Not Indexed",
+            file=file,
+            file_type="txt",
+            status=DocumentStatus.READY,
+            chunking_status=ChunkingStatus.READY,
+            indexing_status=IndexingStatus.PENDING,
+        )
+
+        response = self.client.post(
+            "/api/documents/search/",
+            {
+                "query": "test",
+                "document_id": document.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 409)
