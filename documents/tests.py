@@ -1,8 +1,9 @@
 from documents.services.citations import extract_citation_ids, validation_citations
-from documents.services.evaluation import calculate_precision_at_k, calculate_recall_at_K
+from documents.services.evaluation import calculate_precision_at_k, calculate_recall_at_K, calculate_reciprocal_rank
 from documents.services.rag import answer_question
 from documents.services.llm import generate_answer
 from django.test import SimpleTestCase, override_settings
+from documents.services.reranker import rerank_results
 from documents.services.retrieval import search_similar_chunks
 from documents.services.indexing import process_document_indexing
 from httpx import patch
@@ -932,11 +933,18 @@ class RAGQualityTests(
     @patch(
         "documents.services.rag.search_similar_chunks"
     )
+    @patch(
+        "documents.services.rag.rerank_results"
+    )
     def test_citations_are_validated(
         self,
+        mock_rerank,
         mock_search,
         mock_generate,
     ):
+        mock_rerank.side_effect = (
+            lambda query, results, top_k: results[:top_k]
+        )
 
         mock_search.return_value = [
             {
@@ -979,11 +987,18 @@ class RAGQualityTests(
     @patch(
         "documents.services.rag.search_similar_chunks"
     )
+    @patch(
+        "documents.services.rag.rerank_results"
+    )
     def test_invalid_citation_is_detected(
         self,
+        mock_rerank,
         mock_search,
         mock_generate,
     ):
+        mock_rerank.side_effect = (
+            lambda query, results, top_k: results[:top_k]
+        )
 
         mock_search.return_value = [
             {
@@ -1033,11 +1048,18 @@ class DocumentRAGAPITests(APITestCase):
     @patch(
         "documents.services.rag.search_similar_chunks"
     )
+    @patch(
+        "documents.services.rag.rerank_results"
+    )
     def test_rag_api_returns_limited_sources_and_validates_citations(
         self,
+        mock_rerank,
         mock_search,
         mock_generate,
     ):
+        mock_rerank.side_effect = (
+            lambda query, results, top_k: results[:top_k]
+        )
         mock_search.return_value = [
             {
                 "chunk_id": chunk_id,
@@ -1071,6 +1093,7 @@ class DocumentRAGAPITests(APITestCase):
             response.data["retrieval"],
             {
                 "retrieved_count": 8,
+                "candidate_count": 7,
                 "context_count": 4,
             },
         )
@@ -1387,4 +1410,133 @@ class RetrievalEvaluationTests(
         self.assertEqual(
             score,
             0.5,
+        )
+
+class RerankerTests(
+    SimpleTestCase
+):
+
+    @patch(
+        "documents.services.reranker.get_reranker"
+    )
+    def test_rerank_results(
+        self,
+        mock_get_reranker,
+    ):
+
+        mock_model = MagicMock()
+
+        mock_model.predict.return_value = [
+            0.20,
+            0.95,
+            0.50,
+        ]
+
+        mock_get_reranker.return_value = (
+            mock_model
+        )
+
+        results = [
+            {
+                "chunk_id": 1,
+                "content": "Some unrelated text.",
+                "score": 0.80,
+            },
+            {
+                "chunk_id": 2,
+                "content": "Refund policy information.",
+                "score": 0.70,
+            },
+            {
+                "chunk_id": 3,
+                "content": "Shipping information.",
+                "score": 0.60,
+            },
+        ]
+
+        reranked = rerank_results(
+            query="What is the refund policy?",
+            results=results,
+            top_k=2,
+        )
+
+        self.assertEqual(
+            len(reranked),
+            2,
+        )
+
+        self.assertEqual(
+            reranked[0]["chunk_id"],
+            2,
+        )
+
+        self.assertEqual(
+            reranked[0]["rerank_score"],
+            0.95,
+        )
+
+        self.assertEqual(
+            reranked[1]["chunk_id"],
+            3,
+        )
+
+    def test_empty_results(self):
+
+        result = rerank_results(
+            query="What is the refund policy?",
+            results=[],
+            top_k=5,
+        )
+
+        self.assertEqual(
+            result,
+            [],
+        )
+
+    def test_empty_query(self):
+
+        with self.assertRaises(
+            ValueError
+        ):
+            rerank_results(
+                query="",
+                results=[
+                    {
+                        "chunk_id": 1,
+                        "content": "Some text.",
+                    }
+                ],
+            )
+
+    def test_reciprocal_rank(self):
+
+        score = calculate_reciprocal_rank(
+            expected_chunk_ids=[42],
+            retrieved_chunk_ids=[
+                10,
+                20,
+                42,
+            ],
+        )
+
+        self.assertAlmostEqual(
+            score,
+            1 / 3,
+        )
+
+
+    def test_reciprocal_rank_first_result(self):
+
+        score = calculate_reciprocal_rank(
+            expected_chunk_ids=[42],
+            retrieved_chunk_ids=[
+                42,
+                10,
+                20,
+            ],
+        )
+
+        self.assertEqual(
+            score,
+            1.0,
         )

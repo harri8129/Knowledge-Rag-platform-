@@ -50,16 +50,34 @@ OPENROUTER_MODEL = os.getenv(
 )
 
 RAG_TOP_K = int(
-    os.getenv("RAG_TOP_K", "8")
+    os.getenv(
+        "RAG_TOP_K",
+        "20",
+    )
 )
 
 RAG_MIN_SCORE = float(
-    os.getenv("RAG_MIN_SCORE", "0.30")
+    os.getenv(
+        "RAG_MIN_SCORE",
+        "0.20",
+    )
 )
 
 RAG_MAX_CONTEXT_CHUNKS = int(
     os.getenv(
         "RAG_MAX_CONTEXT_CHUNKS",
+        "6",
+    )
+)
+
+RERANKER_MODEL = os.getenv(
+    "RERANKER_MODEL",
+    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+)
+
+RERANKER_TOP_K = int(
+    os.getenv(
+        "RERANKER_TOP_K",
         "6",
     )
 )

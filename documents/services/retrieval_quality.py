@@ -1,9 +1,10 @@
 from collections import OrderedDict
 
-def filter_by_score(results: list[dict],minimum_score:float | None = None) -> list[dict]:
-    """
-    Remove results below the minimum similarity score
-    """
+
+def filter_by_score(
+    results: list[dict],
+    minimum_score: float | None = None,
+) -> list[dict]:
 
     if minimum_score is None:
         return results
@@ -11,25 +12,24 @@ def filter_by_score(results: list[dict],minimum_score:float | None = None) -> li
     return [
         result
         for result in results
-        if result.get("score",0.0) >= minimum_score
+        if result.get(
+            "score",
+            0.0,
+        ) >= minimum_score
     ]
 
 
-def deduplicate_results(results: list[dict]):
-    """
-    Remove duplicate chunks 
-
-    primary key:
-        chunk_id
-
-    fallback:
-        document_id + page_number + content
-    """
+def deduplicate_results(
+    results: list[dict],
+) -> list[dict]:
 
     unique = OrderedDict()
 
     for result in results:
-        chunk_id = result.get("chunk_id")
+
+        chunk_id = result.get(
+            "chunk_id"
+        )
 
         if chunk_id is not None:
             key = f"chunk:{chunk_id}"
@@ -43,14 +43,15 @@ def deduplicate_results(results: list[dict]):
         if key not in unique:
             unique[key] = result
 
-    return list(unique.values())
+    return list(
+        unique.values()
+    )
 
 
-def limit_results(results: list[dict],limit: int) -> list[dict]:
-    """ 
-    Limit the final number of context chunks.
-    """
-
+def limit_results(
+    results: list[dict],
+    limit: int,
+) -> list[dict]:
     if limit < 1:
         raise ValueError(
             "Limit must be greater than zero"
@@ -62,23 +63,22 @@ def limit_results(results: list[dict],limit: int) -> list[dict]:
 def prepare_retrieval_results(
     results: list[dict],
     minimum_score: float | None = None,
-    max_results: int = 8,
+    max_results: int | None = None,
 ) -> list[dict]:
-    """
-    Complete post-retrieval quality pipeline.
-    """
+
     results = filter_by_score(
         results,
-        minimum_score=minimum_score,
-    )        
+        minimum_score,
+    )
 
     results = deduplicate_results(
         results
     )
 
-    results = limit_results(
-        results,
-        limit=max_results,
-    )
+    if max_results is not None:
+        results = limit_results(
+            results,
+            max_results,
+        )
 
     return results

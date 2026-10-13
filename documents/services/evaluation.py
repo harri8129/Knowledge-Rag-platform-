@@ -32,3 +32,22 @@ def calculate_precision_at_k(
     )
 
     return len(found) / len(retrieved)
+
+
+def calculate_reciprocal_rank(
+    expected_chunk_ids: list[int],
+    retrieved_chunk_ids: list[int],
+) -> float:
+
+    expected = set(
+        expected_chunk_ids
+    )
+
+    for position, chunk_id in enumerate(
+        retrieved_chunk_ids,
+        start=1,
+    ):
+        if chunk_id in expected:
+            return 1.0 / position
+
+    return 0.0

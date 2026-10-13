@@ -1,8 +1,12 @@
 from django.conf import settings
 
-from documents.services.citations import validation_citations
+from documents.services.citations import (
+    validation_citations,
+)
 
-from documents.services.context import build_context_documents
+from documents.services.context import (
+    build_context_documents,
+)
 
 from documents.services.llm import (
     generate_answer,
@@ -18,7 +22,12 @@ from documents.services.retrieval import (
 )
 
 from documents.services.retrieval_quality import (
+    limit_results,
     prepare_retrieval_results,
+)
+
+from documents.services.reranker import (
+    rerank_results,
 )
 
 
@@ -45,7 +54,7 @@ def answer_question(
         )
 
     # ----------------------------------------
-    # 1. Retrieve candidate chunks
+    # 1. Vector retrieval
     # ----------------------------------------
 
     retrieved_results = (
@@ -58,23 +67,18 @@ def answer_question(
     )
 
     # ----------------------------------------
-    # 2. Quality filtering
+    # 2. Basic retrieval quality
     # ----------------------------------------
 
-    results = prepare_retrieval_results(
-        retrieved_results,
-        minimum_score=score_threshold,
-        max_results=(
-            settings.RAG_MAX_CONTEXT_CHUNKS
-        ),
+    candidate_results = (
+        prepare_retrieval_results(
+            retrieved_results,
+            minimum_score=score_threshold,
+            max_results=None,
+        )
     )
 
-    # ----------------------------------------
-    # 3. No relevant context
-    # ----------------------------------------
-
-    if not results:
-
+    if not candidate_results:
         return {
             "query": query,
             "answer": (
@@ -93,6 +97,47 @@ def answer_question(
                 "retrieved_count": len(
                     retrieved_results
                 ),
+                "candidate_count": 0,
+                "context_count": 0,
+            },
+        }
+
+    # ----------------------------------------
+    # 3. Reranking
+    # ----------------------------------------
+
+    reranked_results = rerank_results(
+        query=query,
+        results=candidate_results,
+        top_k=settings.RERANKER_TOP_K,
+    )
+    reranked_results = limit_results(
+        reranked_results,
+        settings.RAG_MAX_CONTEXT_CHUNKS,
+    )
+
+    if not reranked_results:
+        return {
+            "query": query,
+            "answer": (
+                "The provided documents do not "
+                "contain enough information to "
+                "answer this question."
+            ),
+            "sources": [],
+            "citations": {
+                "cited_sources": [],
+                "invalid_citations": [],
+                "citation_count": 0,
+                "has_invalid_citations": False,
+            },
+            "retrieval": {
+                "retrieved_count": len(
+                    retrieved_results
+                ),
+                "candidate_count": len(
+                    candidate_results
+                ),
                 "context_count": 0,
             },
         }
@@ -102,7 +147,7 @@ def answer_question(
     # ----------------------------------------
 
     sources = build_context_documents(
-        results
+        reranked_results
     )
 
     # ----------------------------------------
@@ -133,7 +178,7 @@ def answer_question(
     )
 
     # ----------------------------------------
-    # 8. Return API response
+    # 8. Public source information
     # ----------------------------------------
 
     public_sources = []
@@ -159,8 +204,16 @@ def answer_question(
                 "score": source[
                     "score"
                 ],
+                "rerank_score": source.get(
+                    "rerank_score"
+                ),
             }
         )
+
+
+    # ----------------------------------------
+    # 9. Final response
+    # ----------------------------------------
 
     return {
         "query": query,
@@ -170,6 +223,9 @@ def answer_question(
         "retrieval": {
             "retrieved_count": len(
                 retrieved_results
+            ),
+            "candidate_count": len(
+                candidate_results
             ),
             "context_count": len(
                 sources
