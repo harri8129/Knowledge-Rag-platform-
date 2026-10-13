@@ -1,6 +1,8 @@
+from documents.services.citations import extract_citation_ids, validation_citations
+from documents.services.evaluation import calculate_precision_at_k, calculate_recall_at_K
 from documents.services.rag import answer_question
 from documents.services.llm import generate_answer
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from documents.services.retrieval import search_similar_chunks
 from documents.services.indexing import process_document_indexing
 from httpx import patch
@@ -18,6 +20,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from documents.models import Document, DocumentPage, DocumentStatus
+from documents.services.retrieval_quality import deduplicate_results, filter_by_score, limit_results, prepare_retrieval_results
 
 
 class DocumentAPITests(APITestCase):
@@ -881,7 +884,47 @@ class GenerateAnswerValidationTests(SimpleTestCase):
                 user_prompt="",
             )
 
-class RAGServiceTests(SimpleTestCase):
+class RAGQualityTests(
+    SimpleTestCase
+):
+
+    @override_settings(RAG_MIN_SCORE=0.47)
+    @patch(
+        "documents.services.rag.generate_answer"
+    )
+    @patch(
+        "documents.services.rag.search_similar_chunks"
+    )
+    def test_default_score_threshold_uses_setting(
+        self,
+        mock_search,
+        mock_generate,
+    ):
+        mock_search.return_value = [
+            {
+                "chunk_id": 10,
+                "document_id": 1,
+                "document_title": "Policy",
+                "page_number": 4,
+                "chunk_index": 2,
+                "content": "Refunds are allowed within 30 days.",
+                "score": 0.46,
+            }
+        ]
+
+        result = answer_question(
+            query="What is the refund policy?"
+        )
+
+        self.assertEqual(
+            mock_search.call_args.kwargs["score_threshold"],
+            0.47,
+        )
+        self.assertEqual(
+            result["retrieval"]["context_count"],
+            0,
+        )
+        mock_generate.assert_not_called()
 
     @patch(
         "documents.services.rag.generate_answer"
@@ -889,11 +932,12 @@ class RAGServiceTests(SimpleTestCase):
     @patch(
         "documents.services.rag.search_similar_chunks"
     )
-    def test_answer_question(
+    def test_citations_are_validated(
         self,
         mock_search,
         mock_generate,
     ):
+
         mock_search.return_value = [
             {
                 "chunk_id": 10,
@@ -916,46 +960,431 @@ class RAGServiceTests(SimpleTestCase):
             query="What is the refund policy?"
         )
 
-        self.assertEqual(       
-            result["query"],
-            "What is the refund policy?",
-        )
-
         self.assertEqual(
-            result["answer"],
-            "Refunds are allowed within 30 days [S1].",
+            result["citations"][
+                "cited_sources"
+            ],
+            ["S1"],
         )
 
-        self.assertEqual(
-            len(result["sources"]),
-            1,
+        self.assertFalse(
+            result["citations"][
+                "has_invalid_citations"
+            ]
         )
 
-        mock_search.assert_called_once()
-
-        mock_generate.assert_called_once()
-
+    @patch(
+        "documents.services.rag.generate_answer"
+    )
     @patch(
         "documents.services.rag.search_similar_chunks"
     )
-    def test_no_context(
+    def test_invalid_citation_is_detected(
         self,
         mock_search,
+        mock_generate,
     ):
-        mock_search.return_value = []
+
+        mock_search.return_value = [
+            {
+                "chunk_id": 10,
+                "document_id": 1,
+                "document_title": "Policy",
+                "page_number": 4,
+                "chunk_index": 2,
+                "content": (
+                    "Refunds are allowed within 30 days."
+                ),
+                "score": 0.91,
+            }
+        ]
+
+        mock_generate.return_value = (
+            "The company was founded in 2012 [S99]."
+        )
 
         result = answer_question(
-            query="What is the refund policy?"
+            query="When was the company founded?"
         )
 
         self.assertEqual(
-            result["sources"],
+            result["citations"][
+                "invalid_citations"
+            ],
+            ["S99"],
+        )
+
+        self.assertTrue(
+            result["citations"][
+                "has_invalid_citations"
+            ]
+        )
+
+
+class DocumentRAGAPITests(APITestCase):
+
+    @override_settings(
+        RAG_MIN_SCORE=0.30,
+        RAG_MAX_CONTEXT_CHUNKS=4,
+    )
+    @patch(
+        "documents.services.rag.generate_answer"
+    )
+    @patch(
+        "documents.services.rag.search_similar_chunks"
+    )
+    def test_rag_api_returns_limited_sources_and_validates_citations(
+        self,
+        mock_search,
+        mock_generate,
+    ):
+        mock_search.return_value = [
+            {
+                "chunk_id": chunk_id,
+                "document_id": 1,
+                "document_title": "Policy",
+                "page_number": chunk_id,
+                "chunk_index": chunk_id,
+                "content": f"Policy detail {chunk_id}.",
+                "score": score,
+            }
+            for chunk_id, score in enumerate(
+                [0.90, 0.80, 0.70, 0.60, 0.50, 0.40, 0.35, 0.20],
+                start=1,
+            )
+        ]
+        mock_generate.return_value = (
+            "The policy supports this answer [S1][S2][S99]."
+        )
+
+        response = self.client.post(
+            "/api/documents/rag/",
+            {
+                "query": "What is the refund policy?",
+                "top_k": 8,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data["retrieval"],
+            {
+                "retrieved_count": 8,
+                "context_count": 4,
+            },
+        )
+        self.assertEqual(
+            response.data["citations"],
+            {
+                "cited_sources": ["S1", "S2"],
+                "invalid_citations": ["S99"],
+                "citation_count": 2,
+                "has_invalid_citations": True,
+            },
+        )
+        self.assertEqual(
+            [source["source_id"] for source in response.data["sources"]],
+            ["S1", "S2", "S3", "S4"],
+        )
+        self.assertEqual(
+            mock_search.call_args.kwargs["score_threshold"],
+            0.30,
+        )
+
+
+class CitationValidationTests(
+    SimpleTestCase
+):
+
+    def test_valid_citations(self):
+
+        answer = (
+            "Refunds are available [S1]."
+        )
+
+        sources = [
+            {
+                "source_id": "S1"
+            },
+            {
+                "source_id": "S2"
+            },
+        ]
+
+        result = validation_citations(
+            answer,
+            sources,
+        )
+
+        self.assertEqual(
+            result["cited_sources"],
+            ["S1"],
+        )
+
+        self.assertEqual(
+            result["invalid_citations"],
             [],
         )
 
-        self.assertIn(
-            "could not find",
-            result["answer"].lower(),
+        self.assertFalse(
+            result["has_invalid_citations"]
         )
 
-        
+    def test_invalid_citation(self):
+
+        answer = (
+            "The company was founded in 2012 [S99]."
+        )
+
+        sources = [
+            {
+                "source_id": "S1"
+            },
+            {
+                "source_id": "S2"
+            },
+        ]
+
+        result = validation_citations(
+            answer,
+            sources,
+        )
+
+        self.assertEqual(
+            result["cited_sources"],
+            [],
+        )
+
+        self.assertEqual(
+            result["invalid_citations"],
+            ["S99"],
+        )
+
+        self.assertTrue(
+            result["has_invalid_citations"]
+        )
+
+
+class CitationExtractionTests(
+    SimpleTestCase
+):
+
+    def test_extract_citations(self):
+
+        answer = (
+            "Refunds are available for 30 days [S1]. "
+            "Proof of purchase is required [S2]."
+        )
+
+        citations = extract_citation_ids(
+            answer
+        )
+
+        self.assertEqual(
+            citations,
+            ["S1", "S2"],
+        )
+
+    def test_duplicate_citations(self):
+
+        answer = (
+            "Refunds are available [S1]. "
+            "The policy states [S1]."
+        )
+
+        citations = extract_citation_ids(
+            answer
+        )
+
+        self.assertEqual(
+            citations,
+            ["S1"],
+        )
+
+class RetrievalQualityTests(
+    SimpleTestCase
+):
+
+    def test_filter_by_score(self):
+
+        results = [
+            {
+                "chunk_id": 1,
+                "score": 0.90,
+            },
+            {
+                "chunk_id": 2,
+                "score": 0.40,
+            },
+            {
+                "chunk_id": 3,
+                "score": 0.20,
+            },
+        ]
+
+        filtered = filter_by_score(
+            results,
+            minimum_score=0.30,
+        )
+
+        self.assertEqual(
+            len(filtered),
+            2,
+        )
+
+    def test_deduplicate_results(self):
+
+        results = [
+            {
+                "chunk_id": 1,
+                "score": 0.90,
+            },
+            {
+                "chunk_id": 1,
+                "score": 0.80,
+            },
+            {
+                "chunk_id": 2,
+                "score": 0.70,
+            },
+        ]
+
+        deduplicated = deduplicate_results(
+            results
+        )
+
+        self.assertEqual(
+            len(deduplicated),
+            2,
+        )
+
+    def test_limit_results(self):
+
+        results = [
+            {"chunk_id": 1},
+            {"chunk_id": 2},
+            {"chunk_id": 3},
+        ]
+
+        limited = limit_results(
+            results,
+            limit=2,
+        )
+
+        self.assertEqual(
+            len(limited),
+            2,
+        )
+
+    def test_complete_pipeline(self):
+
+        results = [
+            {
+                "chunk_id": 1,
+                "score": 0.90,
+            },
+            {
+                "chunk_id": 1,
+                "score": 0.89,
+            },
+            {
+                "chunk_id": 2,
+                "score": 0.70,
+            },
+            {
+                "chunk_id": 3,
+                "score": 0.20,
+            },
+        ]
+
+        processed = prepare_retrieval_results(
+            results,
+            minimum_score=0.30,
+            max_results=2,
+        )
+
+        self.assertEqual(
+            len(processed),
+            2,
+        )
+
+        self.assertEqual(
+            processed[0]["chunk_id"],
+            1,
+        )
+
+        self.assertEqual(
+            processed[1]["chunk_id"],
+            2,
+        )
+
+class RetrievalEvaluationTests(
+    SimpleTestCase
+):
+
+    def test_recall(self):
+
+        score = calculate_recall_at_K(
+            expected_chunk_ids=[
+                10,
+                20,
+            ],
+            retrieved_chunk_ids=[
+                10,
+                20,
+                30,
+                40,
+            ],
+        )
+
+        self.assertEqual(
+            score,
+            1.0,
+        )
+
+    def test_partial_recall(self):
+
+        score = calculate_recall_at_K(
+            expected_chunk_ids=[
+                10,
+                20,
+            ],
+            retrieved_chunk_ids=[
+                10,
+                30,
+            ],
+        )
+
+        self.assertEqual(
+            score,
+            0.5,
+        )
+
+    def test_recall_is_zero_when_no_expected_chunks_are_retrieved(self):
+        score = calculate_recall_at_K(
+            expected_chunk_ids=[10, 20],
+            retrieved_chunk_ids=[30, 40],
+        )
+
+        self.assertEqual(score, 0.0)
+
+    def test_precision(self):
+
+        score = calculate_precision_at_k(
+            expected_chunk_ids=[
+                10,
+                20,
+            ],
+            retrieved_chunk_ids=[
+                10,
+                20,
+                30,
+                40,
+            ],
+        )
+
+        self.assertEqual(
+            score,
+            0.5,
+        )

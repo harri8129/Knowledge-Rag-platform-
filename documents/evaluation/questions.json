@@ -1,0 +1,14 @@
+[
+  {
+    "question": "What is the refund policy?",
+    "expected_chunk_ids": [42, 43]
+  },
+  {
+    "question": "How long does shipping take?",
+    "expected_chunk_ids": [51]
+  },
+  {
+    "question": "What payment methods are supported?",
+    "expected_chunk_ids": [67, 68]
+  }
+]

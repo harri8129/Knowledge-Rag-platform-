@@ -271,8 +271,12 @@ class DocumentRAGView(APIView):
 
         query = serializer.validated_data["query"]
         top_k = serializer.validated_data["top_k"]
-        score_threshold = serializer.validated_data["score_threshold"]
-        document_id = serializer.validated_data["document_id"]
+        score_threshold = serializer.validated_data.get(
+            "score_threshold"
+        )
+        document_id = serializer.validated_data.get(
+            "document_id"
+        )
 
        # -----------------------------------------
        # Optional document-specific validation

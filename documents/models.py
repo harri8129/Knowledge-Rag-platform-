@@ -113,3 +113,28 @@ class DocumentChunk(models.Model):
 
     def __str__(self):
         return f"{self.document.title} - Chunk {self.chunk_index}"
+
+class RetrievalEvaluation(models.Model):
+    query = models.TextField()
+
+    expected_chunk_ids = models.JSONField(
+        default=list
+    )
+
+    retrieved_chunk_ids = models.JSONField(
+        default=list
+    )
+
+    top_k = models.PositiveIntegerField(
+        default=5
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.query[:100]

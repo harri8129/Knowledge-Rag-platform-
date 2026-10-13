@@ -50,11 +50,18 @@ OPENROUTER_MODEL = os.getenv(
 )
 
 RAG_TOP_K = int(
-    os.getenv("RAG_TOP_K", "5")
+    os.getenv("RAG_TOP_K", "8")
 )
 
-RAG_SCORE_THRESHOLD = float(
-    os.getenv("RAG_SCORE_THRESHOLD", "0.30")
+RAG_MIN_SCORE = float(
+    os.getenv("RAG_MIN_SCORE", "0.30")
+)
+
+RAG_MAX_CONTEXT_CHUNKS = int(
+    os.getenv(
+        "RAG_MAX_CONTEXT_CHUNKS",
+        "6",
+    )
 )
 
 

@@ -1,22 +1,34 @@
+from documents.services.context import build_llm_context
+
 SYSTEM_PROMPT = """
-You are a question-answering assistant for a private knowledge base.
+You are a grounded question-answering assistant.
 
-Your job is to answer the user's question using ONLY the provided
-context.
+You answer questions using ONLY the supplied context.
 
-Rules:
+STRICT RULES:
 
-1. Use only information contained in the provided context.
-2. Do not invent facts that are not supported by the context.
-3. If the context does not contain enough information to answer the
-   question, clearly say that the information is not available in the
-   provided documents.
-4. Do not use your general knowledge to fill missing information.
-5. When making a factual claim, cite the relevant source using the
-   provided source identifier.
-6. Keep the answer concise but sufficiently detailed.
-7. If multiple sources support the answer, cite all relevant sources.
+1. Never use outside knowledge.
+2. Never invent facts.
+3. Every factual claim must be supported by the provided context.
+4. Cite the source immediately after the claim.
+5. Only use citation IDs that actually exist in the context.
+6. Never create a citation ID that was not provided.
+7. If the context does not contain enough information, say:
+   "The provided documents do not contain enough information to answer this question."
+8. Do not guess or infer unsupported facts.
+9. When multiple sources support a statement, cite all relevant sources.
+10. Prefer a concise answer over unnecessary explanation.
+
+Citation format:
+
+[S1]
+[S2]
+[S1][S3]
+
+The citation IDs correspond exactly to the sources provided
+in the context.
 """.strip()
+
 
 def build_context(results: list[dict]) -> str:
     
@@ -57,25 +69,38 @@ def build_context(results: list[dict]) -> str:
 
     return "\n\n---\n\n".join(context_parts)  
 
-def build_user_prompt(query: str, results: list[dict]) -> str:
+def build_user_prompt(
+    query: str,
+    sources: list[dict],
+) -> str:
 
-    context = build_context(results)
+    context = build_llm_context(
+        sources
+    )
 
     return f"""
-    Context:
+Use the following sources to answer the question.
 
-    {context}
+CONTEXT:
 
-    ---
+{context}
 
-    Question:
+---
 
-    {query}
+QUESTION:
 
-    ---
+{query}
 
-    Answer the question using only the context above.
+---
 
-    For factual statements, include the relevant source identifier,
-    for example [S1] or [S1][S3].
-    """.strip()
+Instructions:
+
+- Answer using only the context.
+- Cite factual claims using the source IDs.
+- Do not invent source IDs.
+- If the answer cannot be supported by the context,
+  say that the provided documents do not contain enough
+  information.
+
+ANSWER:
+""".strip()
