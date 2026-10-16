@@ -1,6 +1,7 @@
 from documents.services.rag import answer_question
 from documents.serializers import RAGRequestSerializer
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from rest_framework import serializers
 from documents.services.chunking_service import process_document_chunks
 from documents.models import DocumentChunk
 from documents.serializers import DocumentChunkSerializer
@@ -37,6 +38,14 @@ class DocumentDetailView(generics.RetrieveDestroyAPIView):
 
 class DocumentProcessView(APIView):
 
+    @extend_schema(
+        request=None,
+        responses={
+            200: DocumentSerializer,
+            400: OpenApiResponse(description="Document processing failed."),
+            409: OpenApiResponse(description="Document cannot be processed."),
+        },
+    )
     def post(self, request, pk):
         document = get_object_or_404(Document, pk=pk)
 
@@ -81,6 +90,34 @@ class DocumentPageListView(generics.ListAPIView):
 
 
 class DocumentChunkProcessView(APIView):
+
+    @extend_schema(
+        request=inline_serializer(
+            name="DocumentChunkProcessRequest",
+            fields={
+                "chunk_size": serializers.IntegerField(
+                    required=False,
+                    default=500,
+                    min_value=1,
+                    max_value=10000,
+                ),
+                "chunk_overlap": serializers.IntegerField(
+                    required=False,
+                    default=100,
+                    min_value=0,
+                ),
+            },
+        ),
+        responses={
+            200: DocumentSerializer,
+            400: OpenApiResponse(description="Invalid chunking parameters."),
+            500: OpenApiResponse(description="Chunk generation failed."),
+        },
+        description=(
+            "Generate document chunks. chunk_overlap must be less than "
+            "chunk_size."
+        ),
+    )
     def post(self,request,pk):
         document = get_object_or_404(Document,pk=pk)
 
@@ -152,6 +189,15 @@ class DocumentChunkListView(generics.ListAPIView):
         )                  
 
 class DocumentIndexView(APIView):
+
+    @extend_schema(
+        request=None,
+        responses={
+            200: DocumentSerializer,
+            400: OpenApiResponse(description="Document cannot be indexed."),
+            500: OpenApiResponse(description="Indexing failed."),
+        },
+    )
     def post(self,request,pk):
         document = get_object_or_404(Document,pk=pk)
 

@@ -1,14 +1,202 @@
 [
   {
-    "question": "What is the refund policy?",
-    "expected_chunk_ids": [42, 43]
+    "id": 1,
+    "document_id": 9,
+    "question": "What is Retrieval-Augmented Generation (RAG)?",
+    "expected_chunk_ids": [2827],
+    "reference_answer": "Retrieval-Augmented Generation (RAG) is an AI technique that combines information retrieval with large language models. It retrieves relevant information from an external knowledge source and provides it to the language model as context so the model can generate answers based on that information.",
+    "expected_citations": [2827]
   },
   {
-    "question": "How long does shipping take?",
-    "expected_chunk_ids": [51]
+    "id": 2,
+    "document_id": 9,
+    "question": "Why is RAG useful compared with relying only on a language model's training data?",
+    "expected_chunk_ids": [2827],
+    "reference_answer": "RAG allows a language model to use relevant information retrieved from external or private knowledge sources instead of relying entirely on information learned during training.",
+    "expected_citations": [2827]
   },
   {
-    "question": "What payment methods are supported?",
-    "expected_chunk_ids": [67, 68]
+    "id": 3,
+    "document_id": 9,
+    "question": "What are embeddings?",
+    "expected_chunk_ids": [2828],
+    "reference_answer": "Embeddings are numerical representations of text, images, or other data. They convert information into vectors that capture semantic meaning.",
+    "expected_citations": [2828]
+  },
+  {
+    "id": 4,
+    "document_id": 9,
+    "question": "Why are embeddings useful for semantic search?",
+    "expected_chunk_ids": [2828],
+    "reference_answer": "Embeddings are useful for semantic search because they allow systems to compare information based on meaning rather than only matching exact keywords.",
+    "expected_citations": [2828]
+  },
+  {
+    "id": 5,
+    "document_id": 9,
+    "question": "What is a vector database?",
+    "expected_chunk_ids": [2830],
+    "reference_answer": "A vector database is a specialized database designed to store, index, and search vector embeddings efficiently.",
+    "expected_citations": [2830]
+  },
+  {
+    "id": 6,
+    "document_id": 9,
+    "question": "What capabilities does Qdrant provide according to the document?",
+    "expected_chunk_ids": [2830],
+    "reference_answer": "Qdrant is an open-source vector database that supports similarity search, metadata filtering, and scalable vector storage.",
+    "expected_citations": [2830]
+  },
+  {
+    "id": 7,
+    "document_id": 9,
+    "question": "How are document chunks and user queries used with a vector database in a RAG application?",
+    "expected_chunk_ids": [2830, 2831],
+    "reference_answer": "Document chunks are converted into embeddings and stored in a vector database. When a user submits a query, the query is also converted into an embedding, and the vector database finds chunks with similar vector representations.",
+    "expected_citations": [2830, 2831]
+  },
+  {
+    "id": 8,
+    "document_id": 9,
+    "question": "How does semantic search differ from keyword-based search?",
+    "expected_chunk_ids": [2831, 2832],
+    "reference_answer": "Semantic search retrieves information based on the meaning and context of a query rather than requiring exact keyword matches. It can identify conceptually related text even when the wording differs.",
+    "expected_citations": [2831, 2832]
+  },
+  {
+    "id": 9,
+    "document_id": 9,
+    "question": "What are the three basic steps of semantic search described in the document?",
+    "expected_chunk_ids": [2832],
+    "reference_answer": "The three steps are: convert the user's query into an embedding, compare the query embedding with stored document embeddings, and return the most relevant document chunks based on vector similarity.",
+    "expected_citations": [2832]
+  },
+  {
+    "id": 10,
+    "document_id": 9,
+    "question": "What is document chunking?",
+    "expected_chunk_ids": [2833],
+    "reference_answer": "Document chunking is the process of splitting large documents into smaller pieces of text called chunks.",
+    "expected_citations": [2833]
+  },
+  {
+    "id": 11,
+    "document_id": 9,
+    "question": "Why are large documents divided into smaller chunks?",
+    "expected_chunk_ids": [2833],
+    "reference_answer": "Large documents may exceed language-model context limits, and processing an entire document at once can reduce retrieval precision. Chunking creates manageable sections that can be independently embedded and retrieved.",
+    "expected_citations": [2833]
+  },
+  {
+    "id": 12,
+    "document_id": 9,
+    "question": "What example of chunk size and overlap is given in the document?",
+    "expected_chunk_ids": [2834],
+    "reference_answer": "The document gives an example of splitting a 10,000-word document into chunks of 500 words with an overlap of 50 words between consecutive chunks.",
+    "expected_citations": [2834]
+  },
+  {
+    "id": 13,
+    "document_id": 9,
+    "question": "Why does chunk overlap help retrieval?",
+    "expected_chunk_ids": [2834],
+    "reference_answer": "Chunk overlap helps preserve context when important information is located near the boundary between two chunks.",
+    "expected_citations": [2834]
+  },
+  {
+    "id": 14,
+    "document_id": 9,
+    "question": "What are the two main stages of a typical RAG pipeline?",
+    "expected_chunk_ids": [2835],
+    "reference_answer": "A typical RAG pipeline consists of two main stages: ingestion and retrieval.",
+    "expected_citations": [2835]
+  },
+  {
+    "id": 15,
+    "document_id": 9,
+    "question": "What steps are involved in the ingestion stage of the RAG pipeline?",
+    "expected_chunk_ids": [2835, 2836],
+    "reference_answer": "The ingestion stage includes document upload, text extraction, text chunking, embedding generation, and vector storage.",
+    "expected_citations": [2835, 2836]
+  },
+  {
+    "id": 16,
+    "document_id": 9,
+    "question": "What steps are involved in the retrieval stage of a RAG pipeline?",
+    "expected_chunk_ids": [2836, 2837],
+    "reference_answer": "The retrieval stage includes converting the user's question into an embedding, performing similarity search in the vector database, retrieving the most relevant chunks, preparing the retrieved context, and generating the answer.",
+    "expected_citations": [2836, 2837]
+  },
+  {
+    "id": 17,
+    "document_id": 9,
+    "question": "What is cosine similarity?",
+    "expected_chunk_ids": [2838],
+    "reference_answer": "Cosine similarity is a metric used to measure the similarity between two non-zero vectors by calculating the cosine of the angle between them.",
+    "expected_citations": [2838]
+  },
+  {
+    "id": 18,
+    "document_id": 9,
+    "question": "What range can cosine similarity values generally have, and what do the values represent?",
+    "expected_chunk_ids": [2838],
+    "reference_answer": "Cosine similarity generally ranges from -1 to 1. A value of 1 indicates vectors point in the same direction, 0 indicates they are orthogonal, and -1 indicates they point in opposite directions.",
+    "expected_citations": [2838]
+  },
+  {
+    "id": 19,
+    "document_id": 9,
+    "question": "What is FastEmbed?",
+    "expected_chunk_ids": [2839],
+    "reference_answer": "FastEmbed is a lightweight library for generating text embeddings efficiently. It supports embedding models without requiring a large machine learning framework.",
+    "expected_citations": [2839]
+  },
+  {
+    "id": 20,
+    "document_id": 9,
+    "question": "Which embedding model is used in the project and how many dimensions does it produce?",
+    "expected_chunk_ids": [2839, 2840],
+    "reference_answer": "The project uses the sentence-transformers/all-MiniLM-L6-v2 model, which produces embeddings with 384 dimensions.",
+    "expected_citations": [2839, 2840]
+  },
+  {
+    "id": 21,
+    "document_id": 9,
+    "question": "Why should the same embedding model be used for document chunks and user queries?",
+    "expected_chunk_ids": [2840],
+    "reference_answer": "Using the same embedding model ensures that document chunks and user queries are represented in a compatible vector space.",
+    "expected_citations": [2840]
+  },
+  {
+    "id": 22,
+    "document_id": 9,
+    "question": "What are the main benefits of RAG described in the document?",
+    "expected_chunk_ids": [2841, 2842],
+    "reference_answer": "The benefits include updated knowledge without retraining the language model, domain-specific answers from private or specialized datasets, source traceability, reduced unsupported responses, and flexible knowledge management.",
+    "expected_citations": [2841, 2842]
+  },
+  {
+    "id": 23,
+    "document_id": 9,
+    "question": "What are some real-world applications of RAG?",
+    "expected_chunk_ids": [2843, 2844],
+    "reference_answer": "The document describes applications including customer support, healthcare research, legal document search, internal knowledge management, and educational assistants.",
+    "expected_citations": [2843, 2844]
+  },
+  {
+    "id": 24,
+    "document_id": 9,
+    "question": "How does the example RAG query demonstrate semantic retrieval?",
+    "expected_chunk_ids": [2845, 2846],
+    "reference_answer": "The example shows a knowledge base statement about Qdrant and a differently worded question asking what database can store embeddings and retrieve similar information. The RAG system converts the question into an embedding and retrieves the Qdrant statement because it is semantically relevant.",
+    "expected_citations": [2845, 2846]
+  },
+  {
+    "id": 25,
+    "document_id": 9,
+    "question": "What components form the foundation of the RAG system described in the conclusion?",
+    "expected_chunk_ids": [2847],
+    "reference_answer": "The foundation consists of document upload, text extraction, chunking, embedding generation, vector storage, semantic retrieval, and answer generation. Django can provide the backend API, PostgreSQL can store document information and extracted chunks, and Qdrant can store embeddings and perform similarity searches.",
+    "expected_citations": [2847]
   }
 ]

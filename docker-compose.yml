@@ -9,7 +9,7 @@ services:
       POSTGRES_USER: rag_user
       POSTGRES_PASSWORD: rag_password
     ports:
-      - "5433:5432"
+      - "5435:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -23,8 +23,7 @@ services:
     container_name: rag-qdrant
     restart: unless-stopped
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "6335:6333"
     volumes:
       - qdrant_data:/qdrant/storage
  

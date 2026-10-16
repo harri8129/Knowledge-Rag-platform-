@@ -21,13 +21,11 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") or None
 
 QDRANT_COLLECTION = os.getenv(
-    "QDRANT_COLLECTION",
-    "rag_document_chunks",
+    "QDRANT_COLLECTION","rag_document_chunks",
 )
 
 EMBEDDING_MODEL = os.getenv(
-    "EMBEDDING_MODEL",
-    "sentence-transformers/all-MiniLM-L6-v2",
+    "EMBEDDING_MODEL","sentence-transformers/all-MiniLM-L6-v2",
 )
 
 EMBEDDING_DIMENSION = int(
@@ -41,8 +39,7 @@ EMBEDDING_BATCH_SIZE = int(
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 OPENROUTER_BASE_URL = os.getenv(
-    "OPENROUTER_BASE_URL",
-    "https://openrouter.ai/api/v1",
+    "OPENROUTER_BASE_URL","https://openrouter.ai/api/v1",
 )
 
 OPENROUTER_MODEL = os.getenv(
@@ -51,35 +48,29 @@ OPENROUTER_MODEL = os.getenv(
 
 RAG_TOP_K = int(
     os.getenv(
-        "RAG_TOP_K",
-        "20",
-    )
+        "RAG_TOP_K","20",)
 )
 
 RAG_MIN_SCORE = float(
     os.getenv(
-        "RAG_MIN_SCORE",
-        "0.20",
-    )
+        "RAG_MIN_SCORE","0.20",)
 )
 
 RAG_MAX_CONTEXT_CHUNKS = int(
     os.getenv(
-        "RAG_MAX_CONTEXT_CHUNKS",
-        "6",
-    )
+        "RAG_MAX_CONTEXT_CHUNKS","6",)
 )
 
 RERANKER_MODEL = os.getenv(
-    "RERANKER_MODEL",
-    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    "RERANKER_MODEL","cross-encoder/ms-marco-MiniLM-L-6-v2",
 )
 
 RERANKER_TOP_K = int(
-    os.getenv(
-        "RERANKER_TOP_K",
-        "6",
-    )
+    os.getenv("RERANKER_TOP_K","6",)
+)
+
+ENABLE_QUERY_REWRITING = (
+    os.getenv("ENABLE_QUERY_REWRITING","true",).lower() == "true"
 )
 
 

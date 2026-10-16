@@ -1,8 +1,17 @@
+import json
+import tempfile
+from pathlib import Path
+
 from documents.services.citations import extract_citation_ids, validation_citations
+from documents.services.context_optimizer import optimize_context, sort_context_results
 from documents.services.evaluation import calculate_precision_at_k, calculate_recall_at_K, calculate_reciprocal_rank
+from documents.services.hybrid_retrieval import reciprocal_rank_fusion, search_hybrid_chunks
+from documents.services.lexical_retrieval import search_lexical_chunks
+from documents.services.neighbor_retrieval import expand_with_neighbors, get_neighbor_chunks
 from documents.services.rag import answer_question
 from documents.services.llm import generate_answer
-from django.test import SimpleTestCase, override_settings
+from documents.services.retrieval_evaluation import evaluate_retrieval_dataset
+from django.test import SimpleTestCase, TestCase, override_settings
 from documents.services.reranker import rerank_results
 from documents.services.retrieval import search_similar_chunks
 from documents.services.indexing import process_document_indexing
@@ -847,11 +856,15 @@ class GenerateAnswerTests(SimpleTestCase):
                 )
             )
         ]
+        mock_response.usage = None
+        raw_response = MagicMock()
+        raw_response.http_response.json.return_value = {}
+        raw_response.parse.return_value = mock_response
 
         mock_client = MagicMock()
 
-        mock_client.chat.completions.create.return_value = (
-            mock_response
+        mock_client.chat.completions.with_raw_response.create.return_value = (
+            raw_response
         )
 
         mock_get_client.return_value = mock_client
@@ -866,7 +879,7 @@ class GenerateAnswerTests(SimpleTestCase):
             "The refund period is 30 days.",
         )
 
-        mock_client.chat.completions.create.assert_called_once()
+        mock_client.chat.completions.with_raw_response.create.assert_called_once()
 
 
 class GenerateAnswerValidationTests(SimpleTestCase):
@@ -894,24 +907,14 @@ class RAGQualityTests(
         "documents.services.rag.generate_answer"
     )
     @patch(
-        "documents.services.rag.search_similar_chunks"
+        "documents.services.rag.search_hybrid_multi_query"
     )
     def test_default_score_threshold_uses_setting(
         self,
         mock_search,
         mock_generate,
     ):
-        mock_search.return_value = [
-            {
-                "chunk_id": 10,
-                "document_id": 1,
-                "document_title": "Policy",
-                "page_number": 4,
-                "chunk_index": 2,
-                "content": "Refunds are allowed within 30 days.",
-                "score": 0.46,
-            }
-        ]
+        mock_search.return_value = []
 
         result = answer_question(
             query="What is the refund policy?"
@@ -931,7 +934,11 @@ class RAGQualityTests(
         "documents.services.rag.generate_answer"
     )
     @patch(
-        "documents.services.rag.search_similar_chunks"
+        "documents.services.rag.search_hybrid_multi_query"
+    )
+    @patch(
+        "documents.services.rag.expand_with_neighbors",
+        side_effect=lambda results, window: results,
     )
     @patch(
         "documents.services.rag.rerank_results"
@@ -939,6 +946,7 @@ class RAGQualityTests(
     def test_citations_are_validated(
         self,
         mock_rerank,
+        mock_expand,
         mock_search,
         mock_generate,
     ):
@@ -985,7 +993,11 @@ class RAGQualityTests(
         "documents.services.rag.generate_answer"
     )
     @patch(
-        "documents.services.rag.search_similar_chunks"
+        "documents.services.rag.search_hybrid_multi_query"
+    )
+    @patch(
+        "documents.services.rag.expand_with_neighbors",
+        side_effect=lambda results, window: results,
     )
     @patch(
         "documents.services.rag.rerank_results"
@@ -993,6 +1005,7 @@ class RAGQualityTests(
     def test_invalid_citation_is_detected(
         self,
         mock_rerank,
+        mock_expand,
         mock_search,
         mock_generate,
     ):
@@ -1046,7 +1059,11 @@ class DocumentRAGAPITests(APITestCase):
         "documents.services.rag.generate_answer"
     )
     @patch(
-        "documents.services.rag.search_similar_chunks"
+        "documents.services.rag.search_hybrid_multi_query"
+    )
+    @patch(
+        "documents.services.rag.expand_with_neighbors",
+        side_effect=lambda results, window: results,
     )
     @patch(
         "documents.services.rag.rerank_results"
@@ -1054,6 +1071,7 @@ class DocumentRAGAPITests(APITestCase):
     def test_rag_api_returns_limited_sources_and_validates_citations(
         self,
         mock_rerank,
+        mock_expand,
         mock_search,
         mock_generate,
     ):
@@ -1071,7 +1089,7 @@ class DocumentRAGAPITests(APITestCase):
                 "score": score,
             }
             for chunk_id, score in enumerate(
-                [0.90, 0.80, 0.70, 0.60, 0.50, 0.40, 0.35, 0.20],
+                [0.90, 0.80, 0.70, 0.60, 0.50, 0.40, 0.35],
                 start=1,
             )
         ]
@@ -1090,12 +1108,16 @@ class DocumentRAGAPITests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            response.data["retrieval"],
-            {
-                "retrieved_count": 8,
-                "candidate_count": 7,
-                "context_count": 4,
-            },
+            response.data["retrieval"]["retrieved_count"],
+            7,
+        )
+        self.assertEqual(
+            response.data["retrieval"]["candidate_count"],
+            7,
+        )
+        self.assertEqual(
+            response.data["retrieval"]["context_count"],
+            4,
         )
         self.assertEqual(
             response.data["citations"],
@@ -1539,4 +1561,587 @@ class RerankerTests(
         self.assertEqual(
             score,
             1.0,
+        )
+
+
+class LexicalRetrievalTests(
+    TestCase
+):
+
+    def setUp(self):
+
+        self.document = Document.objects.create(
+            title="Company Policy",
+            file=SimpleUploadedFile(
+                "company-policy.txt",
+                b"Company policy test document.",
+                content_type="text/plain",
+            ),
+            file_type="txt",
+        )
+
+        refund_page = DocumentPage.objects.create(
+            document=self.document,
+            page_number=1,
+            content=(
+                "Customers can request a refund "
+                "within 30 days."
+            ),
+        )
+        shipping_page = DocumentPage.objects.create(
+            document=self.document,
+            page_number=2,
+            content="Shipping usually takes five days.",
+        )
+
+        DocumentChunk.objects.create(
+            document=self.document,
+            source_page=refund_page,
+            content=refund_page.content,
+            start_offset=0,
+            end_offset=len(refund_page.content),
+            chunk_index=0,
+        )
+
+        DocumentChunk.objects.create(
+            document=self.document,
+            source_page=shipping_page,
+            content=shipping_page.content,
+            start_offset=0,
+            end_offset=len(shipping_page.content),
+            chunk_index=1,
+        )
+
+    def test_exact_keyword_search(self):
+
+        results = search_lexical_chunks(
+            query="refund",
+            top_k=5,
+        )
+
+        self.assertGreater(
+            len(results),
+            0,
+        )
+
+        self.assertIn(
+            "refund",
+            results[0]["content"].lower(),
+        )
+
+class RRFTests(
+    SimpleTestCase
+):
+
+    def test_rrf_combines_results(self):
+
+        dense = [
+            {
+                "chunk_id": 1,
+                "content": "A",
+                "score": 0.9,
+            },
+            {
+                "chunk_id": 2,
+                "content": "B",
+                "score": 0.8,
+            },
+            {
+                "chunk_id": 3,
+                "content": "C",
+                "score": 0.7,
+            },
+        ]
+
+        lexical = [
+            {
+                "chunk_id": 2,
+                "content": "B",
+                "lexical_score": 1.0,
+            },
+            {
+                "chunk_id": 1,
+                "content": "A",
+                "lexical_score": 0.8,
+            },
+            {
+                "chunk_id": 4,
+                "content": "D",
+                "lexical_score": 0.7,
+            },
+        ]
+
+        results = (
+            reciprocal_rank_fusion(
+                dense_results=dense,
+                lexical_results=lexical,
+                k=60,
+            )
+        )
+
+        self.assertEqual(
+            len(results),
+            4,
+        )
+
+        # Chunk 1 and 2 appear in
+        # both retrieval systems.
+        self.assertIn(
+            results[0]["chunk_id"],
+            [1, 2],
+        )
+
+    def test_chunk_found_by_both_gets_boost(self):
+
+        dense = [
+            {
+                "chunk_id": 1,
+            },
+        ]
+
+        lexical = [
+            {
+                "chunk_id": 1,
+            },
+        ]
+
+        results = (
+            reciprocal_rank_fusion(
+                dense_results=dense,
+                lexical_results=lexical,
+            )
+        )
+
+        self.assertEqual(
+            len(results),
+            1,
+        )
+
+        expected = (
+            1 / 61
+            +
+            1 / 61
+        )
+
+        self.assertAlmostEqual(
+            results[0]["rrf_score"],
+            expected,
+        )
+
+class HybridRetrievalTests(
+    SimpleTestCase
+):
+
+    @patch(
+        "documents.services.hybrid_retrieval.search_lexical_chunks"
+    )
+    @patch(
+        "documents.services.hybrid_retrieval.search_similar_chunks"
+    )
+    def test_hybrid_search(
+        self,
+        mock_dense,
+        mock_lexical,
+    ):
+
+        mock_dense.return_value = [
+            {
+                "chunk_id": 1,
+                "content": "Semantic result",
+                "score": 0.8,
+            }
+        ]
+
+        mock_lexical.return_value = [
+            {
+                "chunk_id": 1,
+                "content": "Exact keyword result",
+                "lexical_score": 1.0,
+            },
+            {
+                "chunk_id": 2,
+                "content": "Keyword result",
+                "lexical_score": 0.5,
+            },
+        ]
+
+        results = search_hybrid_chunks(
+            query="refund policy",
+            top_k=10,
+        )
+
+        self.assertEqual(
+            len(results),
+            2,
+        )
+
+        self.assertEqual(
+            results[0]["chunk_id"],
+            1,
+        )
+
+        self.assertIsNotNone(
+            results[0]["rrf_score"]
+        )
+
+        self.assertEqual(
+            results[0]["dense_rank"],
+            1,
+        )
+
+        self.assertEqual(
+            results[0]["lexical_rank"],
+            1,
+        )
+
+
+    @patch(
+        "documents.services.rag.search_hybrid_multi_query"
+    )
+    @patch(
+        "documents.services.rag.expand_with_neighbors",
+        side_effect=lambda results, window: results,
+    )
+    @patch(
+        "documents.services.rag.rerank_results"
+    )
+    @patch(
+        "documents.services.rag.generate_answer"
+    )
+    def test_hybrid_rag_pipeline(
+        self,
+        mock_generate,
+        mock_rerank,
+        mock_expand,
+        mock_hybrid,
+    ):
+
+        mock_hybrid.return_value = [
+            {
+                "chunk_id": 1,
+                "document_id": 1,
+                "document_title": "Policy",
+                "page_number": 2,
+                "content": (
+                    "Refunds are allowed within 30 days."
+                ),
+                "score": 0.8,
+                "lexical_score": 1.2,
+                "rrf_score": 0.032,
+                "dense_rank": 2,
+                "lexical_rank": 1,
+            }
+        ]
+
+        mock_rerank.return_value = [
+            {
+                "chunk_id": 1,
+                "document_id": 1,
+                "document_title": "Policy",
+                "page_number": 2,
+                "content": (
+                    "Refunds are allowed within 30 days."
+                ),
+                "score": 0.8,
+                "lexical_score": 1.2,
+                "rrf_score": 0.032,
+                "dense_rank": 2,
+                "lexical_rank": 1,
+                "rerank_score": 7.2,
+            }
+        ]
+
+        mock_generate.return_value = (
+            "Refunds are allowed within 30 days [S1]."
+        )
+
+        result = answer_question(
+            query="What is the refund policy?"
+        )
+
+        self.assertEqual(
+            result["retrieval"]["context_count"],
+            1,
+        )
+
+        self.assertEqual(
+            result["citations"]["cited_sources"],
+            ["S1"],
+        )
+        self.assertEqual(
+            result["sources"][0]["dense_rank"],
+            2,
+        )
+        self.assertEqual(
+            result["sources"][0]["lexical_rank"],
+            1,
+        )
+        self.assertEqual(
+            result["sources"][0]["rrf_score"],
+            0.032,
+        )
+        self.assertEqual(
+            result["sources"][0]["dense_score"],
+            0.8,
+        )
+        self.assertEqual(
+            result["sources"][0]["lexical_score"],
+            1.2,
+        )
+
+
+class RetrievalDatasetEvaluationTests(
+    SimpleTestCase
+):
+
+    @patch(
+        "documents.services.retrieval_evaluation.search_hybrid_chunks"
+    )
+    @patch(
+        "documents.services.retrieval_evaluation.search_similar_chunks"
+    )
+    def test_compares_dense_and_hybrid_metrics(
+        self,
+        mock_dense,
+        mock_hybrid,
+    ):
+        dataset = [
+            {
+                "question": "First question?",
+                "expected_chunk_ids": [10, 11],
+            },
+            {
+                "question": "Second question?",
+                "expected_chunk_ids": [20],
+            },
+        ]
+        dense_results_by_query = {
+            "First question?": [10, 30, 40, 50, 60],
+            "Second question?": [20, 21],
+        }
+        dense_result_batches = []
+        hybrid_results_by_query = {
+            "First question?": [30, 11, 10, 40, 50],
+            "Second question?": [99, 20],
+        }
+
+        def make_dense_results(query, **kwargs):
+            results = [
+                {"chunk_id": chunk_id}
+                for chunk_id in dense_results_by_query[query]
+            ]
+            dense_result_batches.append(results)
+            return results
+
+        mock_dense.side_effect = make_dense_results
+        mock_hybrid.side_effect = (
+            lambda query, dense_results, **kwargs: [
+                {"chunk_id": chunk_id}
+                for chunk_id in hybrid_results_by_query[query]
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            dataset_path = Path(directory) / "questions.json"
+            dataset_path.write_text(
+                json.dumps(dataset),
+                encoding="utf-8",
+            )
+
+            report = evaluate_retrieval_dataset(
+                dataset_path=dataset_path,
+                top_k=5,
+                score_threshold=0.3,
+            )
+
+        self.assertEqual(report["question_count"], 2)
+        self.assertEqual(
+            report["averages"]["dense"],
+            {
+                "recall_at_k": 0.75,
+                "precision_at_k": 0.35,
+                "mrr": 1.0,
+            },
+        )
+        self.assertEqual(
+            report["averages"]["hybrid"],
+            {
+                "recall_at_k": 1.0,
+                "precision_at_k": 0.45,
+                "mrr": 0.5,
+            },
+        )
+        self.assertEqual(
+            mock_hybrid.call_args_list[0].kwargs["dense_results"],
+            dense_result_batches[0],
+        )
+        self.assertEqual(
+            mock_hybrid.call_args_list[1].kwargs["dense_results"],
+            dense_result_batches[1],
+        )
+
+    def test_rejects_invalid_dataset_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset_path = Path(directory) / "questions.json"
+            dataset_path.write_text(
+                json.dumps(
+                    [{"question": "Question?", "expected_chunk_ids": []}]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "expected_chunk_ids",
+            ):
+                evaluate_retrieval_dataset(
+                    dataset_path=dataset_path,
+                )
+
+class NeighborRetrievalTests(
+    TestCase
+):
+
+    def setUp(self):
+
+        self.document = (
+            Document.objects.create(
+                title="Test Document",
+                file_type="txt",
+            )
+        )
+        self.page = DocumentPage.objects.create(
+            document=self.document,
+            page_number=1,
+            content="Chunk 0 Chunk 1 Chunk 2 Chunk 3 Chunk 4",
+        )
+
+        for index in range(5):
+
+            DocumentChunk.objects.create(
+                document=self.document,
+                source_page=self.page,
+                chunk_index=index,
+                content=f"Chunk {index}",
+                start_offset=index * 8,
+                end_offset=index * 8 + 7,
+            )
+
+    def test_get_neighbors(self):
+
+        middle_chunk = (
+            DocumentChunk.objects.get(
+                document=self.document,
+                chunk_index=2,
+            )
+        )
+
+        results = get_neighbor_chunks(
+            chunk_id=middle_chunk.id,
+            window=1,
+        )
+
+        chunk_indexes = [
+            item["chunk_index"]
+            for item in results
+        ]
+
+        self.assertEqual(
+            chunk_indexes,
+            [1, 2, 3],
+        )
+
+    def test_expand_with_neighbors(self):
+
+        middle_chunk = (
+            DocumentChunk.objects.get(
+                document=self.document,
+                chunk_index=2,
+            )
+        )
+
+        results = [
+            {
+                "chunk_id": middle_chunk.id,
+                "chunk_index": 2,
+                "content": "Chunk 2",
+                "rerank_score": 5.0,
+            }
+        ]
+
+        expanded = expand_with_neighbors(
+            results,
+            window=1,
+        )
+
+        indexes = sorted(
+            item["chunk_index"]
+            for item in expanded
+        )
+
+        self.assertEqual(
+            indexes,
+            [1, 2, 3],
+        )
+
+class ContextOptimizerTests(
+    SimpleTestCase
+):
+
+    def test_primary_chunks_first(self):
+
+        results = [
+            {
+                "chunk_id": 2,
+                "rerank_score": 2.0,
+                "is_neighbor": True,
+            },
+            {
+                "chunk_id": 1,
+                "rerank_score": 5.0,
+                "is_neighbor": False,
+            },
+        ]
+
+        sorted_results = (
+            sort_context_results(
+                results
+            )
+        )
+
+        self.assertEqual(
+            sorted_results[0][
+                "chunk_id"
+            ],
+            1,
+        )
+
+    def test_context_limit(self):
+
+        results = [
+            {
+                "chunk_id": 1,
+                "is_neighbor": False,
+                "rerank_score": 5,
+            },
+            {
+                "chunk_id": 2,
+                "is_neighbor": False,
+                "rerank_score": 4,
+            },
+            {
+                "chunk_id": 3,
+                "is_neighbor": True,
+                "rerank_score": 2,
+            },
+        ]
+
+        optimized = optimize_context(
+            results,
+            max_chunks=2,
+        )
+
+        self.assertEqual(
+            len(optimized),
+            2,
         )

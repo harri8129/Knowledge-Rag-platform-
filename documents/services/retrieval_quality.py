@@ -5,17 +5,13 @@ def filter_by_score(
     results: list[dict],
     minimum_score: float | None = None,
 ) -> list[dict]:
-
     if minimum_score is None:
         return results
 
     return [
         result
         for result in results
-        if result.get(
-            "score",
-            0.0,
-        ) >= minimum_score
+        if result.get("score", 0.0) >= minimum_score
     ]
 
 
@@ -68,7 +64,7 @@ def prepare_retrieval_results(
 
     results = filter_by_score(
         results,
-        minimum_score,
+        minimum_score=minimum_score,
     )
 
     results = deduplicate_results(

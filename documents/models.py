@@ -103,13 +103,22 @@ class DocumentChunk(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["chunk_index"]
+        ordering = ["document_id","chunk_index"]
         constraints = [
             models.UniqueConstraint(
                 fields = ["document", "chunk_index"],
                 name = "unique_document_chunk_index",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=[
+                    "document",
+                    "chunk_index",
+                ]
             ),
-        ]    
+        ]
+        
 
     def __str__(self):
         return f"{self.document.title} - Chunk {self.chunk_index}"

@@ -1,9 +1,27 @@
 from django.db import connection
 from rest_framework.decorators import api_view
+from rest_framework import serializers
 from rest_framework.response import Response
+from drf_spectacular.utils import extend_schema, inline_serializer
 
 from .qdrant import get_qdrant_client
 
+HEALTH_CHECK_RESPONSE = inline_serializer(
+    name="HealthCheckResponse",
+    fields={
+        "status": serializers.CharField(
+            help_text="Either 'ok' or 'degraded'.",
+        ),
+        "services": serializers.JSONField(),
+    },
+)
+
+@extend_schema(
+    responses={
+        200: HEALTH_CHECK_RESPONSE,
+        503: HEALTH_CHECK_RESPONSE,
+    },
+)
 @api_view(['GET'])
 def health_check(request):
     services = {}
