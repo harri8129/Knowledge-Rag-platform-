@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -19,6 +20,13 @@ load_dotenv()
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") or None
+QDRANT_TIMEOUT_SECONDS = float(
+    os.getenv("QDRANT_TIMEOUT_SECONDS", "10")
+)
+QDRANT_MAX_ATTEMPTS = int(os.getenv("QDRANT_MAX_ATTEMPTS", "3"))
+QDRANT_RETRY_DELAY_SECONDS = float(
+    os.getenv("QDRANT_RETRY_DELAY_SECONDS", "0.25")
+)
 
 QDRANT_COLLECTION = os.getenv(
     "QDRANT_COLLECTION","rag_document_chunks",
@@ -44,6 +52,18 @@ OPENROUTER_BASE_URL = os.getenv(
 
 OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL",
+)
+OPENROUTER_TIMEOUT_SECONDS = float(
+    os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30")
+)
+OPENROUTER_MAX_RETRIES = int(
+    os.getenv("OPENROUTER_MAX_RETRIES", "2")
+)
+MAX_DOCUMENT_UPLOAD_BYTES = int(
+    os.getenv("MAX_DOCUMENT_UPLOAD_BYTES", str(20 * 1024 * 1024))
+)
+DOCUMENT_OPERATION_STALE_SECONDS = int(
+    os.getenv("DOCUMENT_OPERATION_STALE_SECONDS", "3600")
 )
 
 RAG_TOP_K = int(
@@ -105,11 +125,13 @@ INSTALLED_APPS = [
 
     # Third-party apps
     "rest_framework",
+    "rest_framework_simplejwt",
     "drf_spectacular",
 
     # Local apps
     "core",
     "documents",
+    "users",
 ]
 
 MIDDLEWARE = [
@@ -203,20 +225,79 @@ MAILERS = {
 }
 
 REST_FRAMEWORK = {
-    "DEFAULT_SCHEMA_CLASS": (
-        "drf_spectacular.openapi.AutoSchema"
-    ),
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "EXCEPTION_HANDLER": "core.api_errors.api_exception_handler",
+}
+
+# -----------------------------------------------------------------------
+# JWT settings (djangorestframework-simplejwt)
+# -----------------------------------------------------------------------
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": False,  # enable if you add simplejwt.token_blacklist
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    "USER_ID_FIELD": "id",
+    "USER_ID_CLAIM": "user_id",
+}
+
+DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_DOCUMENT_UPLOAD_BYTES + 1024 * 1024
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "structured": {
+            "format": (
+                "%(asctime)s %(levelname)s %(name)s %(message)s "
+                "document_id=%(document_id)s stage=%(stage)s"
+            ),
+            "defaults": {"document_id": "-", "stage": "-"},
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "structured",
+        },
+    },
+    "loggers": {
+        "documents": {
+            "handlers": ["console"],
+            "level": os.getenv("DJANGO_LOG_LEVEL", "INFO"),
+            "propagate": False,
+        },
+    },
 }
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "RAG Knowledge Engine API",
     "DESCRIPTION": (
-        "API documentation for the RAG Knowledge Engine. "
-        "Includes document management and ingestion."
+        "API documentation for the RAG Knowledge Engine.\n\n"
+        "**Authentication**: Obtain a JWT token via `POST /api/auth/token/` "
+        "then click **Authorize** and enter `Bearer <your_token>`."
     ),
-    "VERSION": "0.2.0",
+    "VERSION": "0.3.0",
     "SERVE_INCLUDE_SCHEMA": False,
     "COMPONENT_SPLIT_REQUEST": True,
+    # Register JWT bearer as the global security scheme
+    "SECURITY": [{"jwtAuth": []}],
+    "APPEND_COMPONENTS": {
+        "securitySchemes": {
+            "jwtAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT",
+            }
+        }
+    },
 }
 
 MEDIA_URL = "/media/"

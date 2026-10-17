@@ -1,14 +1,10 @@
-import os 
-
+from django.conf import settings
 from qdrant_client import QdrantClient
 
+
 def get_qdrant_client() -> QdrantClient:
-
-    url = os.getenv("QDRANT_URL")   
-    
-    api_key = os.getenv("QDRANT_API_KEY") or None 
-
     return QdrantClient(
-        url=url,
-        api_key=api_key,
+        url=settings.QDRANT_URL,
+        api_key=settings.QDRANT_API_KEY,
+        timeout=settings.QDRANT_TIMEOUT_SECONDS,
     )

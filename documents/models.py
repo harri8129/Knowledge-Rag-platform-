@@ -1,12 +1,16 @@
-from pydantic._internal._validators import max_length_validator
-from pydantic_core.core_schema import model_schema
+from django.conf import settings
 from django.db import models
 
 class DocumentStatus(models.TextChoices):
-    UPLOADED = "UPLOADED","Uploaded"
-    PROCESSING = "PROCESSING","Processing"
-    READY = "READY","Ready"
-    FAILED = "FAILED","Failed"
+    UPLOADED = "UPLOADED", "Uploaded"
+    PROCESSING = "PROCESSING", "Processing"
+    CHUNKING = "CHUNKING", "Chunking"
+    INDEXING = "INDEXING", "Indexing"
+    READY = "READY", "Ready"
+    FAILED = "FAILED", "Failed"
+    DELETING = "DELETING", "Deleting"
+    DELETE_FAILED = "DELETE_FAILED", "Delete failed"
+
 
 class ChunkingStatus(models.TextChoices):
     PENDING = "pending", "Pending"
@@ -21,6 +25,13 @@ class IndexingStatus(models.TextChoices):
     FAILED = "failed", "Failed"
 
 class Document(models.Model):
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="documents",
+        null=True,
+        blank=True,
+    )
     title = models.CharField(max_length=255)
     file = models.FileField(upload_to="documents/")
     file_type = models.CharField(max_length=50)
@@ -43,6 +54,11 @@ class Document(models.Model):
     indexing_error = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True,)
     updated_at = models.DateTimeField(auto_now=True,)
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    processing_started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         ordering = ["-created_at"]

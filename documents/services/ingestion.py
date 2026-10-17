@@ -1,3 +1,5 @@
+import logging
+
 from django.db import transaction
 from django.utils import timezone
 
@@ -10,17 +12,40 @@ from documents.services.extraction import (
 extract_document
 )
 
-def process_document(document_id):
-    document = Document.objects.get(id=document_id)
+logger = logging.getLogger(__name__)
 
-    if document.status == DocumentStatus.PROCESSING:
-        raise ValueError("Document is already processing.")
 
-    document.status = DocumentStatus.PROCESSING
-    document.processing_error = ""
-    document.save(
-        update_fields=["status","processing_error","updated_at"]
-    )
+def process_document(document_id: int, *, claimed: bool = False) -> Document:
+    with transaction.atomic():
+        document = Document.objects.select_for_update().get(pk=document_id)
+        if claimed:
+            if document.status != DocumentStatus.PROCESSING:
+                raise ValueError("Document processing was not claimed.")
+        else:
+            if document.status in {
+                DocumentStatus.PROCESSING,
+                DocumentStatus.CHUNKING,
+                DocumentStatus.INDEXING,
+                DocumentStatus.DELETING,
+            }:
+                raise ValueError("Document is already being processed.")
+            if document.status == DocumentStatus.DELETE_FAILED:
+                raise ValueError("Document deletion must be retried first.")
+            document.status = DocumentStatus.PROCESSING
+            document.processing_started_at = timezone.now()
+            document.attempt_count += 1
+            document.save(
+                update_fields=[
+                    "status",
+                    "processing_started_at",
+                    "attempt_count",
+                    "updated_at",
+                ]
+            )
+        document.processing_error = ""
+        document.save(
+            update_fields=["processing_error", "updated_at"]
+        )
 
     try:
         with document.file.open("rb") as file_obj:
@@ -46,6 +71,10 @@ def process_document(document_id):
             ])
 
             document.status = DocumentStatus.READY
+            if claimed:
+                document.status = DocumentStatus.CHUNKING
+            else:
+                document.processing_started_at = None
             document.page_count = len(pages)
             document.processing_error = ""
             document.save(
@@ -53,6 +82,8 @@ def process_document(document_id):
                     "status",
                     "page_count",
                     "processing_error",
+                    "status",
+                    "processing_started_at",
                     "updated_at",
                 ]
             )
@@ -60,15 +91,16 @@ def process_document(document_id):
         return document
 
     except Exception as exc:
-        document.status = DocumentStatus.FAILED
-        document.processing_error = str(exc)
-        document.save(
-            update_fields=[
-                'status',
-                "processing_error",
-                "updated_at",
-            ]
+        logger.exception(
+            "Document extraction failed",
+            extra={
+                "document_id": document_id,
+                "stage": "processing",
+            },
+        )
+        Document.objects.filter(pk=document_id).update(
+            status=DocumentStatus.FAILED,
+            processing_error=str(exc)[:4000],
+            processing_started_at=None,
         )
         raise
-    
-      

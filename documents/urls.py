@@ -1,18 +1,23 @@
 from documents.views import DocumentRAGView
 from documents.views import DocumentSearchView
-from documents.views import DocumentChunkListView,DocumentChunkProcessView,DocumentIndexView
+from documents.views import DocumentChunkListView
 from django.urls import path
 
-from .views import DocumentDetailView, DocumentListCreateView, DocumentPageListView, DocumentProcessView
+from .views import (
+    DocumentDetailView,
+    DocumentListCreateView,
+    DocumentPageListView,
+    DocumentProcessView,
+    DocumentRetryView,
+)
 
 urlpatterns = [
     path("", DocumentListCreateView.as_view(), name="document-list-create"),
     path("<int:pk>/", DocumentDetailView.as_view(), name="document-detail"),
     path("<int:pk>/process/",DocumentProcessView.as_view(),name="document-process"),
+    path("<int:pk>/retry/",DocumentRetryView.as_view(),name="document-retry"),
     path("<int:pk>/pages/",DocumentPageListView.as_view(),name="document=pages"),
-    path("<int:pk>/chunk/",DocumentChunkProcessView.as_view(),name="document-chunk-process",),
     path("<int:pk>/chunks/",DocumentChunkListView.as_view(),name="document-chunk-list",),
-    path("<int:pk>/index/",DocumentIndexView.as_view(),name="document-index"),
     path("search/",DocumentSearchView.as_view(),name="document-search"),
     path("rag/",DocumentRAGView.as_view(),name="document-rag"),
 ]

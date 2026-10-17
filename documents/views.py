@@ -1,8 +1,6 @@
 from documents.services.rag import answer_question
 from documents.serializers import RAGRequestSerializer
-from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
-from rest_framework import serializers
-from documents.services.chunking_service import process_document_chunks
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from documents.models import DocumentChunk
 from documents.serializers import DocumentChunkSerializer
 from django.shortcuts import get_object_or_404
@@ -13,27 +11,69 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from documents.models import Document, DocumentPage, IndexingStatus
+from documents.models import DocumentStatus
 from documents.serializers import (
     DocumentSerializer,
     DocumentPageSerializer,
     RetrievalRequestSerializer
 )
-from documents.services.ingestion import process_document
-from documents.services.indexing import process_document_indexing
 from documents.services.retrieval import search_similar_chunks
 import logging
+from documents.services.lifecycle import (
+    DocumentDeletionError,
+    delete_document,
+)
+from documents.services.pipeline import (
+    PipelineBusyError,
+    schedule_pipeline,
+)
 
 logger = logging.getLogger(__name__)
 
 class DocumentListCreateView(generics.ListCreateAPIView):
-    queryset = Document.objects.all()
     serializer_class = DocumentSerializer
     parser_classes = [MultiPartParser, FormParser]
 
+    def get_queryset(self):
+        """Return only documents owned by the current user."""
+        return Document.objects.filter(owner=self.request.user)
+
+    def perform_create(self, serializer):
+        """Automatically assign the uploading user as owner."""
+        serializer.save(owner=self.request.user)
+
 
 class DocumentDetailView(generics.RetrieveDestroyAPIView):
-    queryset = Document.objects.all()
     serializer_class = DocumentSerializer
+
+    def get_queryset(self):
+        return Document.objects.filter(owner=self.request.user)
+
+    def destroy(self, request, *args, **kwargs):
+        document = self.get_object()
+        try:
+            delete_document(document.pk)
+        except ValueError as exc:
+            return Response(
+                {
+                    "error": {
+                        "code": "document_busy",
+                        "message": str(exc),
+                    }
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        except DocumentDeletionError:
+            return Response(
+                {
+                    "error": {
+                        "code": "document_deletion_failed",
+                        "message": "Document deletion could not be completed.",
+                    }
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class DocumentProcessView(APIView):
@@ -41,38 +81,103 @@ class DocumentProcessView(APIView):
     @extend_schema(
         request=None,
         responses={
-            200: DocumentSerializer,
-            400: OpenApiResponse(description="Document processing failed."),
+            202: DocumentSerializer,
             409: OpenApiResponse(description="Document cannot be processed."),
+            503: OpenApiResponse(description="Processing capacity is full."),
         },
     )
     def post(self, request, pk):
-        document = get_object_or_404(Document, pk=pk)
-
-        try:
-            document = process_document(document.id)
-        except ValueError as exc:
+        # Ownership check — 404 for foreign or non-existent documents
+        if not Document.objects.filter(pk=pk, owner=request.user).exists():
             return Response(
-                {"detail":str(exc)},
-                status=status.HTTP_409_CONFLICT,
+                {"error": {"code": "document_not_found", "message": "Document not found."}},
+                status=status.HTTP_404_NOT_FOUND,
             )
-        except Exception:
-            document.refresh_from_db()
+        try:
+            document = schedule_pipeline(pk)
+        except Document.DoesNotExist:
             return Response(
                 {
-                    "detail": "Document processing failed",
-                    "status": document.status,
-                    "processing_error": document.processing_error,
+                    "error": {
+                        "code": "document_not_found",
+                        "message": "Document not found.",
+                    }
                 },
-                status=status.HTTP_400_BAD_REQUEST,
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except PipelineBusyError as exc:
+            return Response(
+                {
+                    "error": {
+                        "code": "document_busy",
+                        "message": str(exc),
+                    }
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except ValueError as exc:
+            return Response(
+                {
+                    "error": {
+                        "code": "document_invalid_state",
+                        "message": str(exc),
+                    }
+                },
+                status=status.HTTP_409_CONFLICT,
             )
 
         return Response(
             DocumentSerializer(
-                document,
-                context={"request":request},
+                document, context={"request": request}
             ).data,
-            status=status.HTTP_200_OK,
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class DocumentRetryView(APIView):
+    def post(self, request, pk):
+        # Ownership check
+        if not Document.objects.filter(pk=pk, owner=request.user).exists():
+            return Response(
+                {"error": {"code": "document_not_found", "message": "Document not found."}},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        try:
+            document = schedule_pipeline(pk, retry=True)
+        except Document.DoesNotExist:
+            return Response(
+                {
+                    "error": {
+                        "code": "document_not_found",
+                        "message": "Document not found.",
+                    }
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except PipelineBusyError as exc:
+            return Response(
+                {
+                    "error": {
+                        "code": "document_busy",
+                        "message": str(exc),
+                    }
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except ValueError as exc:
+            return Response(
+                {
+                    "error": {
+                        "code": "document_invalid_state",
+                        "message": str(exc),
+                    }
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        return Response(
+            DocumentSerializer(document).data,
+            status=status.HTTP_202_ACCEPTED,
         )
 
 
@@ -81,96 +186,11 @@ class DocumentPageListView(generics.ListAPIView):
 
     def get_queryset(self):
         document_id = self.kwargs["pk"]
-
-        get_object_or_404(Document, pk=document_id)
-
+        # Scope to current user — 404 for foreign documents
+        get_object_or_404(Document, pk=document_id, owner=self.request.user)
         return DocumentPage.objects.filter(
             document_id=document_id
         ).order_by("page_number")
-
-
-class DocumentChunkProcessView(APIView):
-
-    @extend_schema(
-        request=inline_serializer(
-            name="DocumentChunkProcessRequest",
-            fields={
-                "chunk_size": serializers.IntegerField(
-                    required=False,
-                    default=500,
-                    min_value=1,
-                    max_value=10000,
-                ),
-                "chunk_overlap": serializers.IntegerField(
-                    required=False,
-                    default=100,
-                    min_value=0,
-                ),
-            },
-        ),
-        responses={
-            200: DocumentSerializer,
-            400: OpenApiResponse(description="Invalid chunking parameters."),
-            500: OpenApiResponse(description="Chunk generation failed."),
-        },
-        description=(
-            "Generate document chunks. chunk_overlap must be less than "
-            "chunk_size."
-        ),
-    )
-    def post(self,request,pk):
-        document = get_object_or_404(Document,pk=pk)
-
-        try:
-            chunk_size = int(request.data.get("chunk_size",500))
-            chunk_overlap = int(request.data.get("chunk_overlap",100))
-
-            if chunk_size <= 0 or chunk_size > 10000:
-                return Response(
-                    {"detail": "chunk_size must be between 1 and 10000."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            if chunk_overlap < 0 or chunk_overlap >= chunk_size:
-                return Response(
-                    {
-                        "detail": (
-                            "chunk_overlap must be >= 0 "
-                            "and less than chunk_size."
-                        )
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            document = process_document_chunks(
-                document_id=document.id,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-            )
-
-        except ValueError as exc:
-            return Response(
-                {"detail": str(exc)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        except Exception:
-            document.refresh_from_db()
-            return Response(
-                {
-                    "detail": "Chunk generation failed.",
-                    "chunking_status": document.chunking_status,
-                    "chunking_error": document.chunking_error,
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        return Response(
-            DocumentSerializer(
-                document,
-                context={"request": request},
-            ).data,
-            status=status.HTTP_200_OK,
-        )
 
 
 class DocumentChunkListView(generics.ListAPIView):
@@ -178,59 +198,14 @@ class DocumentChunkListView(generics.ListAPIView):
 
     def get_queryset(self):
         document_id = self.kwargs["pk"]
-
-        get_object_or_404(Document, pk=document_id)
-
+        # Scope to current user
+        get_object_or_404(Document, pk=document_id, owner=self.request.user)
         return (
             DocumentChunk.objects
             .filter(document_id=document_id)
             .select_related("source_page", "document")
             .order_by("chunk_index")
         )                  
-
-class DocumentIndexView(APIView):
-
-    @extend_schema(
-        request=None,
-        responses={
-            200: DocumentSerializer,
-            400: OpenApiResponse(description="Document cannot be indexed."),
-            500: OpenApiResponse(description="Indexing failed."),
-        },
-    )
-    def post(self,request,pk):
-        document = get_object_or_404(Document,pk=pk)
-
-        try:
-            document = process_document_indexing(document.id)
-        
-        except ValueError as exc:
-            return Response(
-                {"detail": str(exc)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        except Exception:
-            document.refresh_from_db()
-
-            return Response(
-                {
-                    "detail": "Indexing failed.",
-                    "indexing_status": document.indexing_status,
-                    "indexing_error": document.indexing_error,
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )        
-
-        return Response(
-            DocumentSerializer(
-                document,
-                context={
-                    "request":request
-                },
-            ).data,
-            status=status.HTTP_200_OK,
-        )        
 
 class DocumentSearchView(APIView):
 
@@ -252,18 +227,26 @@ class DocumentSearchView(APIView):
         if document_id is not None:
 
             try:
-                document = Document.objects.get(id=document_id)
+                document = Document.objects.get(id=document_id, owner=request.user)
             except Document.DoesNotExist:
                 return Response(
-                    {"detail": "Document not found"},
+                    {"error": {
+                        "code": "document_not_found",
+                        "message": "Document not found.",
+                    }},
                     status=status.HTTP_404_NOT_FOUND,
                 )
             
-            if document.indexing_status != IndexingStatus.READY:
+            if (
+                document.status != DocumentStatus.READY
+                or document.indexing_status != IndexingStatus.READY
+            ):
                 return Response(
-                    {"detail": ("Document is not indexed"),
-                     "indexing_status":document.indexing_status, 
-                    },
+                    {"error": {
+                        "code": "document_not_ready",
+                        "message": "Document is not indexed.",
+                        "indexing_status": document.indexing_status,
+                    }},
                     status=status.HTTP_409_CONFLICT,
                 )
         
@@ -276,18 +259,22 @@ class DocumentSearchView(APIView):
             )
         except ValueError as exc:
             return Response(
-                {"detail": str(exc)},
+                {"error": {
+                    "code": "invalid_retrieval_request",
+                    "message": str(exc),
+                }},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        except Exception as exc:
-            import traceback
-
-            traceback.print_exc()
-
+        except Exception:
+            logger.exception(
+                "Document retrieval failed",
+                extra={"stage": "retrieval"},
+            )
             return Response(
-                {"detail": "Retrieval failed",
-                "error":str(exc),
-                "type":type(exc).__name__,
+                {"error": {
+                    "code": "retrieval_failed",
+                    "message": "Retrieval failed.",
+                }
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
@@ -331,20 +318,27 @@ class DocumentRAGView(APIView):
         if document_id is not None:
 
             try:
-                document = Document.objects.get(id=document_id)
+                document = Document.objects.get(id=document_id, owner=request.user)
             except Document.DoesNotExist:
                 return Response(
-                    {"detail": "Document not found"},
+                    {"error": {
+                        "code": "document_not_found",
+                        "message": "Document not found.",
+                    }},
                     status=status.HTTP_404_NOT_FOUND,
                 )
             
-            if document.indexing_status != "ready":
+            if (
+                document.status != DocumentStatus.READY
+                or document.indexing_status != IndexingStatus.READY
+            ):
                 return Response(
                     {
-                        "detail": (
-                            "Document is not ready for RAG queries."
-                        ),
-                        "indexing_status": document.indexing_status,
+                        "error": {
+                            "code": "document_not_ready",
+                            "message": "Document is not ready for RAG queries.",
+                            "indexing_status": document.indexing_status,
+                        }
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
@@ -360,19 +354,26 @@ class DocumentRAGView(APIView):
         except ValueError as exc:
             return Response(
                 {
-                    "detail": str(exc)
+                    "error": {
+                        "code": "invalid_rag_request",
+                        "message": str(exc),
+                    }
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        except Exception as exc:
-
-            logger.exception("RAG generation failure")
+        except Exception:
+            logger.exception(
+                "RAG generation failure",
+                extra={"stage": "generation"},
+            )
 
             return Response(
                 {
-                    "detail": str(exc),
-                    "error_type": type(exc).__name__,
+                    "error": {
+                        "code": "rag_generation_failed",
+                        "message": "Answer generation failed.",
+                    }
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )

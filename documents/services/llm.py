@@ -13,6 +13,8 @@ def get_llm_client() -> OpenAI:
     return OpenAI(
         base_url=settings.OPENROUTER_BASE_URL,
         api_key=settings.OPENROUTER_API_KEY,
+        timeout=settings.OPENROUTER_TIMEOUT_SECONDS,
+        max_retries=settings.OPENROUTER_MAX_RETRIES,
     )
 
 def generate_answer(
@@ -29,7 +31,7 @@ def generate_answer(
 def generate_answer_with_usage(
     system_prompt: str,
     user_prompt: str,
-) -> tuple[str, dict[str, int | None]]:
+) -> tuple[str, dict[str, int | float | None]]:
 
     if not system_prompt.strip():
         raise ValueError(
@@ -43,6 +45,8 @@ def generate_answer_with_usage(
 
     client = get_llm_client()
 
+    response = None
+    response_body = None
     for attempt in range(3):
         try:
             raw_response = (
@@ -85,6 +89,11 @@ def generate_answer_with_usage(
         response = raw_response.parse()
         break
 
+    if response is None or response_body is None:
+        raise RuntimeError(
+            "OpenRouter request completed without a response."
+        )
+
     if not response.choices:
         raise RuntimeError(
             "OpenRouter returned no choices for "
@@ -99,6 +108,14 @@ def generate_answer_with_usage(
         )
 
     usage = response.usage
+    provider_usage = response_body.get("usage") or {}
+    reported_cost = provider_usage.get("cost")
+    cost_usd = (
+        float(reported_cost)
+        if isinstance(reported_cost, (int, float))
+        and not isinstance(reported_cost, bool)
+        else None
+    )
     return (
         content.strip(),
         {
@@ -111,5 +128,6 @@ def generate_answer_with_usage(
             "total_tokens": (
                 usage.total_tokens if usage else None
             ),
+            "cost_usd": cost_usd,
         },
     )

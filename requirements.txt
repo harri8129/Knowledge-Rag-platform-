@@ -12,6 +12,7 @@ cuda-pathfinder==1.8.3
 cuda-toolkit==13.0.3.0
 django==6.1.1
 djangorestframework==3.18.1
+djangorestframework-simplejwt==5.5.1
 drf-spectacular==0.30.0
 fastembed==0.8.1
 filelock==4.0.7

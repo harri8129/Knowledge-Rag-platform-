@@ -22,6 +22,8 @@ class DocumentAdmin(admin.ModelAdmin):
         "chunk_count",
         "indexing_status",
         "indexed_chunk_count",
+        "attempt_count",
+        "processing_started_at",
         "created_at",
     ]
     list_filter = [
@@ -41,10 +43,15 @@ class DocumentAdmin(admin.ModelAdmin):
         "indexing_status",
         "indexed_chunk_count",
         "indexing_error",
+        "attempt_count",
+        "processing_started_at",
         "created_at",
         "updated_at",
     ]
     inlines = [DocumentPageInline]
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(DocumentChunk)

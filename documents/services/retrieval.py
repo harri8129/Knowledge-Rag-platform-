@@ -1,10 +1,12 @@
-from qdrant_client.http.models.models import ScrollRequest
-from typing_extensions import NoExtraItems
 from django.conf import settings
-from qdrant_client import QdrantClient, models
+from qdrant_client import models
 
 from documents.services.embeddings import embed_texts
-from documents.services.vector_store import get_qdrant_client
+from documents.services.vector_store import (
+    collection_exists,
+    get_qdrant_client,
+    query_points,
+)
 
 def search_similar_chunks(
     query: str,
@@ -71,12 +73,14 @@ def search_similar_chunks(
     client = get_qdrant_client()
 
     try:
-        if not client.collection_exists(
+        if not collection_exists(
+            client,
             settings.QDRANT_COLLECTION
         ):
             return []
 
-        response = client.query_points(
+        response = query_points(
+            client,
             collection_name=settings.QDRANT_COLLECTION,
             query=query_vector,
             query_filter=query_filter,

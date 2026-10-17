@@ -6,6 +6,8 @@ from typing import Any
 from django.conf import settings
 
 from documents.services.evaluation import (
+    calculate_hit_rate_at_k,
+    calculate_ndcg_at_k,
     calculate_precision_at_k,
     calculate_recall_at_K,
     calculate_reciprocal_rank,
@@ -121,21 +123,24 @@ def evaluate_retrieval_dataset(
         raise ValueError("top_k must be between 1 and 50.")
 
     if score_threshold is None:
-        score_threshold = settings.RAG_MIN_SCORE
+        score_threshold = float(settings.RAG_MIN_SCORE)
     if not 0.0 <= score_threshold <= 1.0:
         raise ValueError(
             "score_threshold must be between 0.0 and 1.0."
         )
 
+    resolved_dataset_path: str | Path
     if dataset_path is None:
-        dataset_path = (
-            settings.BASE_DIR
+        resolved_dataset_path = (
+            Path(settings.BASE_DIR)
             / "documents"
             / "evaluation"
             / "questions.json"
         )
+    else:
+        resolved_dataset_path = dataset_path
 
-    questions = _load_questions(dataset_path)
+    questions = _load_questions(resolved_dataset_path)
     per_question = []
     strategy_totals = {
         "dense": {
@@ -207,7 +212,7 @@ def evaluate_retrieval_dataset(
     }
 
     return {
-        "dataset": str(dataset_path),
+        "dataset": str(resolved_dataset_path),
         "question_count": question_count,
         "top_k": top_k,
         "score_threshold": score_threshold,
@@ -218,13 +223,16 @@ def evaluate_retrieval_dataset(
 
 PHASE_10_STRATEGIES = ("A", "B", "C", "D", "E")
 ANSWER_JUDGE_SYSTEM_PROMPT = """
-You are an impartial answer-quality evaluator.
-Compare each candidate answer with the reference answer. Score semantic
-correctness and completeness from 0.0 to 1.0. Penalize factual errors and
-unsupported claims. Return only JSON mapping each supplied strategy label to
-an object with numeric "score" and a brief "rationale".
-""".strip()
+You are an impartial evaluator of question-answering systems.
+Score each candidate answer from 0.0 to 1.0 for:
+- correctness: semantic accuracy and completeness versus the reference answer
+- relevance: how directly the candidate answers the question
+- faithfulness: whether every factual claim is supported by that candidate's context
 
+The reference answer is for correctness only; it is not evidence for faithfulness.
+Return JSON mapping each strategy label to an object containing numeric
+"correctness", "relevance", and "faithfulness" scores, plus a brief "rationale".
+""".strip()
 
 def _average(values: list[float]) -> float | None:
     if not values:
@@ -233,13 +241,20 @@ def _average(values: list[float]) -> float | None:
 
 
 def _token_totals(
-    usages: list[dict[str, int | None]],
-) -> dict[str, int | None]:
-    totals: dict[str, int | None] = {}
-    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        values = [usage[key] for usage in usages]
+    usages: list[dict[str, int | float | None]],
+) -> dict[str, int | float | None]:
+    totals: dict[str, int | float | None] = {}
+    for key in (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cost_usd",
+    ):
+        values = [usage.get(key) for usage in usages]
         if values and all(value is not None for value in values):
-            totals[key] = sum(value for value in values if value is not None)
+            totals[key] = sum(
+                value for value in values if value is not None
+            )
         else:
             totals[key] = None
     return totals
@@ -258,22 +273,44 @@ def _phase_10_metrics(
         "precision_at_5": calculate_precision_at_k(
             expected_chunk_ids=expected_ids,
             retrieved_chunk_ids=retrieved_at_k,
+            k=5,
         ),
         "mrr": calculate_reciprocal_rank(
             expected_chunk_ids=expected_ids,
             retrieved_chunk_ids=retrieved_at_k,
         ),
+        "hit_rate_at_5": calculate_hit_rate_at_k(
+            expected_chunk_ids=expected_ids,
+            retrieved_chunk_ids=retrieved_at_k,
+            k=5,
+        ),
+        "ndcg_at_5": calculate_ndcg_at_k(
+            expected_chunk_ids=expected_ids,
+            retrieved_chunk_ids=retrieved_at_k,
+            k=5,
+        ),
     }
 
-
 def _judge_answers(
+    query: str,
     reference_answer: str,
+    contexts: dict[str, str],
     answers: dict[str, str],
-) -> tuple[dict[str, dict[str, Any]], dict[str, int | None]]:
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, int | float | None],
+]:
     prompt = json.dumps(
         {
+            "question": query,
             "reference_answer": reference_answer,
-            "candidate_answers": answers,
+            "candidates": {
+                strategy: {
+                    "context": contexts[strategy],
+                    "answer": answers[strategy],
+                }
+                for strategy in answers
+            },
         },
         ensure_ascii=False,
     )
@@ -281,37 +318,43 @@ def _judge_answers(
         system_prompt=ANSWER_JUDGE_SYSTEM_PROMPT,
         user_prompt=prompt,
     )
+
     try:
         scores = json.loads(response)
     except json.JSONDecodeError as exc:
         raise RuntimeError(
             f"Answer judge returned invalid JSON: {exc}"
         ) from exc
+
     if not isinstance(scores, dict):
         raise RuntimeError("Answer judge response must be a JSON object.")
 
     validated: dict[str, dict[str, Any]] = {}
-    for strategy in PHASE_10_STRATEGIES:
+    for strategy in answers:
         result = scores.get(strategy)
         if not isinstance(result, dict):
             raise RuntimeError(
                 f"Answer judge omitted strategy {strategy}."
             )
-        score = result.get("score")
-        if (
-            not isinstance(score, (int, float))
-            or isinstance(score, bool)
-            or not 0.0 <= score <= 1.0
-        ):
-            raise RuntimeError(
-                f"Answer judge returned an invalid score for strategy {strategy}."
-            )
-        validated[strategy] = {
-            "score": float(score),
-            "rationale": str(result.get("rationale", "")),
-        }
-    return validated, usage
 
+        validated_result: dict[str, Any] = {}
+        for metric in ("correctness", "relevance", "faithfulness"):
+            score = result.get(metric)
+            if (
+                not isinstance(score, (int, float))
+                or isinstance(score, bool)
+                or not 0.0 <= score <= 1.0
+            ):
+                raise RuntimeError(
+                    f"Answer judge returned an invalid {metric} score "
+                    f"for strategy {strategy}."
+                )
+            validated_result[metric] = float(score)
+
+        validated_result["rationale"] = str(result.get("rationale", ""))
+        validated[strategy] = validated_result
+
+    return validated, usage
 
 def evaluate_phase_10_dataset(
     dataset_path: str | Path | None = None,
@@ -324,22 +367,25 @@ def evaluate_phase_10_dataset(
     if top_k < 5 or top_k > 50:
         raise ValueError("top_k must be between 5 and 50 for Recall@5.")
     if score_threshold is None:
-        score_threshold = settings.RAG_MIN_SCORE
+        score_threshold = float(settings.RAG_MIN_SCORE)
     if not 0.0 <= score_threshold <= 1.0:
         raise ValueError("score_threshold must be between 0.0 and 1.0.")
     if evaluate_answers and not include_rewriting:
         raise ValueError(
             "Answer evaluation requires all five strategies, including rewriting."
         )
+    resolved_dataset_path: str | Path
     if dataset_path is None:
-        dataset_path = (
-            settings.BASE_DIR
+        resolved_dataset_path = (
+            Path(settings.BASE_DIR)
             / "documents"
             / "evaluation"
             / "questions.json"
         )
+    else:
+        resolved_dataset_path = dataset_path
 
-    questions = _load_questions(dataset_path)
+    questions = _load_questions(resolved_dataset_path)
     if evaluate_answers:
         for index, item in enumerate(questions):
             if not isinstance(item.get("reference_answer"), str) or not item[
@@ -372,9 +418,18 @@ def evaluate_phase_10_dataset(
                 "recall_at_5",
                 "precision_at_5",
                 "mrr",
+                "hit_rate_at_5",
+                "ndcg_at_5",
                 "retrieval_latency_ms",
+                "reranker_latency_ms",
+                "query_rewrite_latency_ms",
+                "neighbor_latency_ms",
+                "llm_latency_ms",
+                "total_latency_ms",
                 "answer_latency_ms",
                 "answer_score",
+                "answer_relevance",
+                "faithfulness",
                 "citation_precision",
                 "citation_recall",
                 "citation_exact",
@@ -382,11 +437,18 @@ def evaluate_phase_10_dataset(
         }
         for strategy in PHASE_10_STRATEGIES
     }
-    stage_usages: dict[str, list[dict[str, int | None]]] = {
+    stage_usages: dict[str, list[dict[str, int | float | None]]] = {
         strategy: [] for strategy in PHASE_10_STRATEGIES
     }
-    judge_usages: list[dict[str, int | None]] = []
+    generation_usages: list[dict[str, int | float | None]] = []
+    rewrite_usages: list[dict[str, int | float | None]] = []
+    judge_usages: list[dict[str, int | float | None]] = []
     per_question: list[dict[str, Any]] = []
+    active_strategies = (
+        PHASE_10_STRATEGIES
+        if include_rewriting
+        else ("A", "B", "C")
+    )
 
     for item in questions:
         query = item["question"].strip()
@@ -432,10 +494,24 @@ def evaluate_phase_10_dataset(
         retrieval_latencies = {
             "A": dense_latency,
             "B": dense_latency + hybrid_latency,
-            "C": dense_latency + hybrid_latency + rerank_latency,
+            "C": dense_latency + hybrid_latency,
         }
-        active_strategies = ("A", "B", "C")
-        rewrite_usage: dict[str, int | None] | None = None
+        reranker_latencies = {
+            "A": 0.0,
+            "B": 0.0,
+            "C": rerank_latency,
+        }
+        query_rewrite_latencies = {
+            "A": 0.0,
+            "B": 0.0,
+            "C": 0.0,
+        }
+        neighbor_latencies = {
+            "A": 0.0,
+            "B": 0.0,
+            "C": 0.0,
+        }
+        rewrite_usage: dict[str, int | float | None] | None = None
         if include_rewriting:
             rewrite_started = perf_counter()
             rewrite_plan, rewrite_usage = analyze_query_with_usage(query)
@@ -457,13 +533,17 @@ def evaluate_phase_10_dataset(
                 score_threshold=score_threshold,
                 document_id=question_document_id,
             )
+            rewritten_retrieval_latency = (
+                perf_counter() - rewritten_started
+            ) * 1000
+            rewritten_rerank_started = perf_counter()
             rewritten_reranked = rerank_results(
                 query=query,
                 results=rewritten_hybrid,
                 top_k=top_k,
             )
-            rewritten_latency = (
-                perf_counter() - rewritten_started
+            rewritten_rerank_latency = (
+                perf_counter() - rewritten_rerank_started
             ) * 1000
 
             neighbor_started = perf_counter()
@@ -477,23 +557,41 @@ def evaluate_phase_10_dataset(
                 max_chunks=max(top_k + 1, settings.RAG_MAX_CONTEXT_CHUNKS),
             )
             neighbor_latency = (perf_counter() - neighbor_started) * 1000
+            retrieval_latencies.update(
+                {
+                    "D": rewritten_retrieval_latency,
+                    "E": rewritten_retrieval_latency,
+                }
+            )
+            reranker_latencies.update(
+                {
+                    "D": rewritten_rerank_latency,
+                    "E": rewritten_rerank_latency,
+                }
+            )
+            query_rewrite_latencies.update(
+                {
+                    "D": rewrite_latency,
+                    "E": rewrite_latency,
+                }
+            )
+            neighbor_latencies.update(
+                {
+                    "D": 0.0,
+                    "E": neighbor_latency,
+                }
+            )
             retrieved_by_strategy.update(
                 {
                     "D": rewritten_reranked,
                     "E": expanded,
                 }
             )
-            retrieval_latencies.update(
-                {
-                    "D": rewrite_latency + rewritten_latency,
-                    "E": (
-                        rewrite_latency
-                        + rewritten_latency
-                        + neighbor_latency
-                    ),
-                }
-            )
-            active_strategies = PHASE_10_STRATEGIES
+            for strategy in ("D", "E"):
+                if rewrite_usage is not None:
+                    stage_usages[strategy].append(rewrite_usage)
+            if rewrite_usage is not None:
+                rewrite_usages.append(rewrite_usage)
 
         question_result: dict[str, Any] = {
             "id": item.get("id"),
@@ -513,12 +611,30 @@ def evaluate_phase_10_dataset(
                 "retrieved_chunk_ids": retrieved_ids,
                 **metrics,
                 "retrieval_latency_ms": retrieval_latencies[strategy],
+                "reranker_latency_ms": reranker_latencies[strategy],
+                "query_rewrite_latency_ms": query_rewrite_latencies[strategy],
+                "neighbor_latency_ms": neighbor_latencies[strategy],
+                "llm_latency_ms": 0.0,
+                "total_latency_ms": (
+                    retrieval_latencies[strategy]
+                    + reranker_latencies[strategy]
+                    + query_rewrite_latencies[strategy]
+                    + neighbor_latencies[strategy]
+                ),
             }
             for metric, value in metrics.items():
                 stage_totals[strategy][metric].append(value)
-            stage_totals[strategy]["retrieval_latency_ms"].append(
-                retrieval_latencies[strategy]
-            )
+            for latency_name in (
+                "retrieval_latency_ms",
+                "reranker_latency_ms",
+                "query_rewrite_latency_ms",
+                "neighbor_latency_ms",
+                "llm_latency_ms",
+                "total_latency_ms",
+            ):
+                stage_totals[strategy][latency_name].append(
+                    stage[latency_name]
+                )
 
             if evaluate_answers:
                 sources = build_context_documents(results)
@@ -533,15 +649,33 @@ def evaluate_phase_10_dataset(
                 answers[strategy] = answer
                 stage["answer"] = answer
                 stage["answer_latency_ms"] = answer_latency
+                stage["llm_latency_ms"] = answer_latency
+                stage["total_latency_ms"] += answer_latency
+                stage_totals[strategy]["llm_latency_ms"][-1] = (
+                    answer_latency
+                )
+                stage_totals[strategy]["total_latency_ms"][-1] = (
+                    stage["total_latency_ms"]
+                )
                 stage_totals[strategy]["answer_latency_ms"].append(
                     answer_latency
                 )
                 stage_usages[strategy].append(usage)
+                generation_usages.append(usage)
             question_result["strategies"][strategy] = stage
 
         if evaluate_answers:
+            contexts = {
+                strategy: "\n\n".join(
+                    source.get("content") or ""
+                    for source in source_records[strategy]
+                )
+                for strategy in answers
+            }
             judged, judge_usage = _judge_answers(
+                query=query,
                 reference_answer=item["reference_answer"],
+                contexts=contexts,
                 answers=answers,
             )
             judge_usages.append(judge_usage)
@@ -556,16 +690,21 @@ def evaluate_phase_10_dataset(
                     for source in sources
                 }
                 cited_source_ids = extract_citation_ids(stage["answer"])
-                cited_chunk_ids = {
-                    source_id_to_chunk_id[source_id]
-                    for source_id in cited_source_ids
-                    if source_id in source_id_to_chunk_id
-                    and isinstance(source_id_to_chunk_id[source_id], int)
-                }
+                cited_chunk_ids: set[int] = set()
+                invalid_citation_ids = []
+                for source_id in cited_source_ids:
+                    chunk_id = source_id_to_chunk_id.get(source_id)
+                    if (
+                        isinstance(chunk_id, int)
+                        and not isinstance(chunk_id, bool)
+                    ):
+                        cited_chunk_ids.add(chunk_id)
+                    else:
+                        invalid_citation_ids.append(source_id)
                 correct_citations = cited_chunk_ids & expected_citations
                 citation_precision = (
-                    len(correct_citations) / len(cited_chunk_ids)
-                    if cited_chunk_ids
+                    len(correct_citations) / len(cited_source_ids)
+                    if cited_source_ids
                     else 0.0
                 )
                 citation_recall = (
@@ -573,45 +712,68 @@ def evaluate_phase_10_dataset(
                     if expected_citations
                     else 0.0
                 )
-                citation_exact = float(
+                citation_exact = (
                     cited_chunk_ids == expected_citations
+                    and not invalid_citation_ids
                 )
-                answer_score = judged[strategy]["score"]
+                judged_answer = judged[strategy]
+                answer_score = judged_answer["correctness"]
                 stage["answer_score"] = answer_score
                 stage["answer_correct"] = answer_score >= 0.7
-                stage["answer_judge_rationale"] = judged[strategy]["rationale"]
+                stage["answer_relevance"] = judged_answer["relevance"]
+                stage["faithfulness"] = judged_answer["faithfulness"]
+                stage["answer_judge_rationale"] = judged_answer["rationale"]
                 stage["cited_chunk_ids"] = sorted(cited_chunk_ids)
+                stage["invalid_citation_ids"] = invalid_citation_ids
                 stage["citation_precision"] = citation_precision
                 stage["citation_recall"] = citation_recall
-                stage["citation_exact"] = bool(citation_exact)
-                stage["citation_correct"] = bool(citation_exact)
+                stage["citation_exact"] = citation_exact
+                stage["citation_correct"] = citation_exact
                 stage_totals[strategy]["answer_score"].append(answer_score)
+                stage_totals[strategy]["answer_relevance"].append(
+                    judged_answer["relevance"]
+                )
+                stage_totals[strategy]["faithfulness"].append(
+                    judged_answer["faithfulness"]
+                )
                 stage_totals[strategy]["citation_precision"].append(
                     citation_precision
                 )
                 stage_totals[strategy]["citation_recall"].append(
                     citation_recall
                 )
-                stage_totals[strategy]["citation_exact"].append(citation_exact)
-                if strategy in ("D", "E") and rewrite_usage is not None:
-                    stage_usages[strategy].append(rewrite_usage)
+                stage_totals[strategy]["citation_exact"].append(
+                    float(citation_exact)
+                )
 
         per_question.append(question_result)
 
-    summaries: dict[str, dict[str, Any]] = {}
     summaries: dict[str, dict[str, Any]] = {}
     for strategy in PHASE_10_STRATEGIES:
         if strategy not in active_strategies:
             summaries[strategy] = {"status": "not_run"}
             continue
         totals = stage_totals[strategy]
-        summary = {
+        summary: dict[str, Any] = {
             "recall_at_5": _average(totals["recall_at_5"]),
             "precision_at_5": _average(totals["precision_at_5"]),
             "mrr": _average(totals["mrr"]),
             "retrieval_latency_ms": _average(
                 totals["retrieval_latency_ms"]
             ),
+            "reranker_latency_ms": _average(
+                totals["reranker_latency_ms"]
+            ),
+            "query_rewrite_latency_ms": _average(
+                totals["query_rewrite_latency_ms"]
+            ),
+            "neighbor_latency_ms": _average(
+                totals["neighbor_latency_ms"]
+            ),
+            "llm_latency_ms": _average(totals["llm_latency_ms"]),
+            "total_latency_ms": _average(totals["total_latency_ms"]),
+            "hit_rate_at_5": _average(totals["hit_rate_at_5"]),
+            "ndcg_at_5": _average(totals["ndcg_at_5"]),
         }
         if evaluate_answers:
             summary.update(
@@ -620,6 +782,10 @@ def evaluate_phase_10_dataset(
                     "answer_correctness_rate": _average(
                         [float(score >= 0.7) for score in totals["answer_score"]]
                     ),
+                    "answer_relevance": _average(
+                        totals["answer_relevance"]
+                    ),
+                    "faithfulness": _average(totals["faithfulness"]),
                     "citation_precision": _average(
                         totals["citation_precision"]
                     ),
@@ -632,21 +798,30 @@ def evaluate_phase_10_dataset(
                     "answer_latency_ms": _average(
                         totals["answer_latency_ms"]
                     ),
-                    "answer_and_rewrite_tokens": _token_totals(
-                        stage_usages[strategy]
-                    ),
                 }
             )
+        summary["llm_usage"] = _token_totals(stage_usages[strategy])
+        summary["answer_and_rewrite_usage"] = summary["llm_usage"]
+        summary["answer_and_rewrite_tokens"] = summary["llm_usage"]
         summaries[strategy] = summary
 
     return {
-        "dataset": str(dataset_path),
+        "dataset": str(resolved_dataset_path),
         "question_count": len(questions),
         "top_k": top_k,
         "score_threshold": score_threshold,
         "strategies_run": list(active_strategies),
         "answer_evaluation": evaluate_answers,
         "averages": summaries,
+        "openrouter_usage": {
+            "generation": _token_totals(generation_usages),
+            "query_rewriting": _token_totals(rewrite_usages),
+            "judge": _token_totals(judge_usages),
+            "total": _token_totals(
+                generation_usages + rewrite_usages + judge_usages
+            ),
+        },
+        "answer_judge_usage": _token_totals(judge_usages),
         "answer_judge_tokens": _token_totals(judge_usages),
         "questions": per_question,
     }

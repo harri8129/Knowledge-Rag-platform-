@@ -113,7 +113,7 @@ def analyze_query(query : str,) -> Queryplan:
 
 def analyze_query_with_usage(
     query: str,
-) -> tuple[Queryplan, dict[str, int | None]]:
+) -> tuple[Queryplan, dict[str, int | float | None]]:
 
     query = query.strip()
 

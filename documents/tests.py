@@ -1,20 +1,45 @@
 import json
 import tempfile
+from concurrent.futures import Future
+from datetime import timedelta
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
 
 from documents.services.citations import extract_citation_ids, validation_citations
 from documents.services.context_optimizer import optimize_context, sort_context_results
-from documents.services.evaluation import calculate_precision_at_k, calculate_recall_at_K, calculate_reciprocal_rank
+from documents.services.evaluation import (
+    calculate_hit_rate_at_k,
+    calculate_ndcg_at_k,
+    calculate_precision_at_k,
+    calculate_recall_at_K,
+    calculate_reciprocal_rank,
+)
 from documents.services.hybrid_retrieval import reciprocal_rank_fusion, search_hybrid_chunks
 from documents.services.lexical_retrieval import search_lexical_chunks
 from documents.services.neighbor_retrieval import expand_with_neighbors, get_neighbor_chunks
 from documents.services.rag import answer_question
+from documents.services.ingestion import process_document
+from documents.services.chunking_service import process_document_chunks
+from documents.services.llm import get_llm_client
 from documents.services.llm import generate_answer
-from documents.services.retrieval_evaluation import evaluate_retrieval_dataset
+from documents.services.retrieval_evaluation import (
+    evaluate_phase_10_dataset,
+    evaluate_retrieval_dataset,
+)
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.core.management import call_command, CommandError
 from documents.services.reranker import rerank_results
 from documents.services.retrieval import search_similar_chunks
 from documents.services.indexing import process_document_indexing
+from documents.services.pipeline import PipelineBusyError
+from documents.services.vector_store import (
+    _retry,
+    delete_document_points,
+    get_qdrant_client,
+)
 from httpx import patch
 from documents.models import IndexingStatus
 from documents.services.chunking import split_text
@@ -24,6 +49,7 @@ from documents.admin import DocumentAdmin
 from django.http import response
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
+from django.utils import timezone
 from unittest.mock import patch, MagicMock
 
 from rest_framework import status
@@ -38,7 +64,7 @@ class DocumentAPITests(APITestCase):
     def create_file(
         self,
         name="test.pdf",
-        content=b"test content",
+        content=b"%PDF-1.4\nTest PDF contents",
     ):
         return SimpleUploadedFile(
             name=name,
@@ -67,9 +93,7 @@ class DocumentAPITests(APITestCase):
             Document.objects.count(),
             1,
         )
-
         document = Document.objects.first()
-
         self.assertEqual(
             document.title,
             "test",
@@ -108,8 +132,57 @@ class DocumentAPITests(APITestCase):
 
         self.assertIn(
             "file",
-            response.data,
+            response.data["error"]["message"],
         )
+
+    def test_upload_rejects_mime_type_mismatch(self):
+        uploaded = SimpleUploadedFile(
+            "sample.txt",
+            b"plain text",
+            content_type="application/pdf",
+        )
+
+        response = self.client.post(
+            "/api/documents/",
+            {"file": uploaded},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_upload_rejects_non_utf8_text(self):
+        uploaded = SimpleUploadedFile(
+            "sample.txt",
+            b"\xff\xfe",
+            content_type="text/plain",
+        )
+
+        response = self.client.post(
+            "/api/documents/",
+            {"file": uploaded},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Document.objects.count(), 0)
+
+    @override_settings(MAX_DOCUMENT_UPLOAD_BYTES=4)
+    def test_upload_rejects_oversized_file(self):
+        uploaded = SimpleUploadedFile(
+            "sample.txt",
+            b"12345",
+            content_type="text/plain",
+        )
+
+        response = self.client.post(
+            "/api/documents/",
+            {"file": uploaded},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Document.objects.count(), 0)
 
     def test_list_documents(self):
 
@@ -177,30 +250,172 @@ class DocumentAPITests(APITestCase):
             format="multipart",
         )
 
-        print("Create status:", create_response.status_code)
-        print("Create data:", create_response.data)
-
         document_id = create_response.data["id"]
 
-        print("Document ID:", document_id)
-        print("Database count:", Document.objects.count())
-
-        response = self.client.delete(
-            f"/api/documents/{document_id}/"
-        )
-
-        print("Detail status:", response.status_code)
-        print("Detail data:", response.data)
+        with patch(
+            "documents.services.lifecycle.delete_document_points"
+        ) as mock_delete_vectors:
+            response = self.client.delete(
+                f"/api/documents/{document_id}/"
+            )
 
         self.assertEqual(
             response.status_code,
             status.HTTP_204_NO_CONTENT,
         )
+        mock_delete_vectors.assert_called_once_with(document_id)
 
         self.assertEqual(
             Document.objects.count(),
             0,
         )
+
+    def test_delete_retains_document_if_vector_cleanup_fails(self):
+        create_response = self.client.post(
+            "/api/documents/",
+            {"file": self.create_file()},
+            format="multipart",
+        )
+        document_id = create_response.data["id"]
+
+        with patch(
+            "documents.services.lifecycle.delete_document_points",
+            side_effect=RuntimeError("Qdrant unavailable"),
+        ):
+            response = self.client.delete(
+                f"/api/documents/{document_id}/"
+            )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+        document = Document.objects.get(pk=document_id)
+        self.assertEqual(document.status, DocumentStatus.DELETE_FAILED)
+        self.assertTrue(document.file.storage.exists(document.file.name))
+
+
+class DocumentPipelineAPITests(APITestCase):
+    def test_retry_endpoint_only_schedules_failed_documents(self):
+        document = Document.objects.create(
+            title="Failed",
+            file_type="txt",
+            status=DocumentStatus.FAILED,
+        )
+
+        with patch(
+            "documents.views.schedule_pipeline",
+            return_value=document,
+        ) as mock_schedule:
+            response = self.client.post(
+                f"/api/documents/{document.pk}/retry/"
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        mock_schedule.assert_called_once_with(document.pk, retry=True)
+
+    def test_pipeline_submission_returns_service_unavailable_when_busy(self):
+        document = Document.objects.create(
+            title="Busy",
+            file_type="txt",
+            status=DocumentStatus.UPLOADED,
+        )
+
+        with patch(
+            "documents.views.schedule_pipeline",
+            side_effect=PipelineBusyError("No worker capacity."),
+        ):
+            response = self.client.post(
+                f"/api/documents/{document.pk}/process/"
+            )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+        self.assertEqual(
+            response.data["error"]["code"],
+            "document_busy",
+        )
+
+    def test_second_pipeline_request_cannot_claim_same_document(self):
+        document = Document.objects.create(
+            title="Queued",
+            file_type="txt",
+            status=DocumentStatus.UPLOADED,
+        )
+        completed_future = Future()
+        completed_future.set_result(None)
+
+        with (
+            patch(
+                "documents.services.pipeline._executor.submit",
+                return_value=completed_future,
+            ),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            from documents.services.pipeline import schedule_pipeline
+
+            schedule_pipeline(document.pk)
+            with self.assertRaises(PipelineBusyError):
+                schedule_pipeline(document.pk)
+
+    def test_retry_resets_incomplete_pipeline_stage_statuses(self):
+        document = Document.objects.create(
+            title="Failed stage",
+            file_type="txt",
+            status=DocumentStatus.FAILED,
+            chunking_status=ChunkingStatus.PROCESSING,
+            indexing_status=IndexingStatus.PROCESSING,
+            indexed_chunk_count=3,
+        )
+        completed_future = Future()
+        completed_future.set_result(None)
+
+        with (
+            patch(
+                "documents.services.pipeline._executor.submit",
+                return_value=completed_future,
+            ),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            from documents.services.pipeline import schedule_pipeline
+
+            schedule_pipeline(document.pk, retry=True)
+
+        document.refresh_from_db()
+        self.assertEqual(document.status, DocumentStatus.PROCESSING)
+        self.assertEqual(document.chunking_status, ChunkingStatus.PENDING)
+        self.assertEqual(document.indexing_status, IndexingStatus.PENDING)
+        self.assertEqual(document.indexed_chunk_count, 0)
+
+
+class StaleDocumentRecoveryTests(TestCase):
+    def test_recovery_marks_stale_stage_failed(self):
+        document = Document.objects.create(
+            title="Stale indexing",
+            file_type="txt",
+            status=DocumentStatus.INDEXING,
+            indexing_status=IndexingStatus.PROCESSING,
+            indexed_chunk_count=2,
+            processing_started_at=timezone.now() - timedelta(minutes=2),
+        )
+
+        call_command(
+            "recover_stale_documents",
+            older_than=1,
+            stdout=StringIO(),
+        )
+
+        document.refresh_from_db()
+        self.assertEqual(document.status, DocumentStatus.FAILED)
+        self.assertEqual(document.indexing_status, IndexingStatus.FAILED)
+        self.assertEqual(document.indexed_chunk_count, 0)
+        self.assertIsNone(document.processing_started_at)
+
+    def test_recovery_rejects_non_positive_age(self):
+        with self.assertRaises(CommandError):
+            call_command("recover_stale_documents", older_than=0)
 
 
 class DocumentIngestionTests(APITestCase):
@@ -233,25 +448,32 @@ class DocumentIngestionTests(APITestCase):
 
         document_id = response.data["id"]
 
-        process_response = self.client.post(
-            f"/api/documents/{document_id}/process/"
-        )
+        document = Document.objects.get(pk=document_id)
+        document.status = DocumentStatus.PROCESSING
+        with patch(
+            "documents.views.schedule_pipeline",
+            return_value=document,
+        ):
+            process_response = self.client.post(
+                f"/api/documents/{document_id}/process/"
+            )
 
         self.assertEqual(
             process_response.status_code,
-            status.HTTP_200_OK,
+            status.HTTP_202_ACCEPTED,
         )
-
         self.assertEqual(
             process_response.data["status"],
-            DocumentStatus.READY,
-        )
-        self.assertEqual(
-            process_response.data["page_count"],
-            1,
+            DocumentStatus.PROCESSING,
         )
 
-        page = DocumentPage.objects.get(document_id=document_id,page_number=1)
+        document = process_document(document_id)
+        self.assertEqual(document.status, DocumentStatus.READY)
+        self.assertEqual(document.page_count, 1)
+        page = DocumentPage.objects.get(
+            document_id=document_id,
+            page_number=1,
+        )
         self.assertEqual(
             page.content,
             "This is a test document for RAG.",
@@ -261,9 +483,7 @@ class DocumentIngestionTests(APITestCase):
         response = self.upload_text_file()
         document_id = response.data["id"]
 
-        self.client.post(
-            f"/api/documents/{document_id}/process/"
-        )
+        process_document(document_id)
 
         pages_response = self.client.get(
             f"/api/documents/{document_id}/pages/"
@@ -276,7 +496,7 @@ class DocumentIngestionTests(APITestCase):
             "This is a test document for RAG.",
         )
 
-    def test_processing_invalid_pdf_marks_failed(self):
+    def test_invalid_pdf_content_is_rejected_during_upload(self):
         file = SimpleUploadedFile(
             "broken.pdf",
             b"not a valid pdf",
@@ -289,31 +509,18 @@ class DocumentIngestionTests(APITestCase):
             format="multipart",
         )
 
-        document_id = upload_response.data["id"]
-
-        process_response = self.client.post(
-            f"/api/documents/{document_id}/process/"
-        )
-
         self.assertEqual(
-            process_response.status_code,
+            upload_response.status_code,
             status.HTTP_400_BAD_REQUEST,
         )
-
-        document = Document.objects.get(id=document_id)
-        self.assertEqual(document.status, DocumentStatus.FAILED)
-        self.assertTrue(document.processing_error)
+        self.assertEqual(Document.objects.count(), 0)
 
     def test_reprocess_document_replaces_pages(self):
         response = self.upload_text_file()
         document_id = response.data["id"]
 
-        self.client.post(
-            f"/api/documents/{document_id}/process/"
-        )
-        self.client.post(
-            f"/api/documents/{document_id}/process/"
-        )
+        process_document(document_id)
+        process_document(document_id)
 
         self.assertEqual(
             DocumentPage.objects.filter(
@@ -382,41 +589,30 @@ class DocumentChunkAPITests(APITestCase):
 
         return document, page
 
-    def test_generate_chunks(self):
-        content = "This is a test. " * 50
-        document, _ = self.create_ready_document(content)
+    def test_manual_chunk_and_index_endpoints_are_removed(self):
+        document, _ = self.create_ready_document("Test content.")
 
-        response = self.client.post(
-            f"/api/documents/{document.id}/chunk/",
+        chunk_response = self.client.post(
+            f"/api/documents/{document.pk}/chunk/",
             {"chunk_size": 100, "chunk_overlap": 20},
             format="json",
         )
-
-        self.assertEqual(response.status_code, 200)
-
-        document.refresh_from_db()
-        self.assertEqual(
-            document.chunking_status,
-            ChunkingStatus.READY,
+        index_response = self.client.post(
+            f"/api/documents/{document.pk}/index/"
         )
-        self.assertGreater(document.chunk_count, 1)
-        self.assertEqual(
-            DocumentChunk.objects.filter(document=document).count(),
-            document.chunk_count,
-        )
+
+        self.assertEqual(chunk_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(index_response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_chunks_keep_page_reference(self):
         document, page = self.create_ready_document(
             "This is content from page one. " * 20
         )
-
-        response = self.client.post(
-            f"/api/documents/{document.id}/chunk/",
-            {"chunk_size": 100, "chunk_overlap": 20},
-            format="json",
+        process_document_chunks(
+            document.pk,
+            chunk_size=100,
+            chunk_overlap=20,
         )
-
-        self.assertEqual(response.status_code, 200)
 
         chunk = DocumentChunk.objects.filter(
             document=document
@@ -428,11 +624,10 @@ class DocumentChunkAPITests(APITestCase):
         document, _ = self.create_ready_document(
             "Example content. " * 20
         )
-
-        self.client.post(
-            f"/api/documents/{document.id}/chunk/",
-            {"chunk_size": 100, "chunk_overlap": 20},
-            format="json",
+        process_document_chunks(
+            document.pk,
+            chunk_size=100,
+            chunk_overlap=20,
         )
 
         response = self.client.get(
@@ -443,52 +638,28 @@ class DocumentChunkAPITests(APITestCase):
         self.assertGreater(len(response.data), 0)
         self.assertIn("page_number", response.data[0])
 
-    def test_cannot_chunk_unprocessed_document(self):
-        uploaded = SimpleUploadedFile(
-            "pending.txt",
-            b"Unprocessed document",
-            content_type="text/plain",
-        )
-
-        document = Document.objects.create(
-            title="Pending",
-            file=uploaded,
-            file_type="txt",
-            status=DocumentStatus.UPLOADED,
-        )
-
-        response = self.client.post(
-            f"/api/documents/{document.id}/chunk/",
-            {"chunk_size": 100, "chunk_overlap": 20},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 400)
-
     def test_reprocessing_does_not_duplicate_chunks(self):
         document, _ = self.create_ready_document(
             "Repeatable chunking test. " * 30
         )
 
-        url = f"/api/documents/{document.id}/chunk/"
-        payload = {"chunk_size": 100, "chunk_overlap": 20}
-
-        first_response = self.client.post(
-            url, payload, format="json"
+        process_document_chunks(
+            document.pk,
+            chunk_size=100,
+            chunk_overlap=20,
         )
         first_count = DocumentChunk.objects.filter(
             document=document
         ).count()
-
-        second_response = self.client.post(
-            url, payload, format="json"
+        process_document_chunks(
+            document.pk,
+            chunk_size=100,
+            chunk_overlap=20,
         )
         second_count = DocumentChunk.objects.filter(
             document=document
         ).count()
 
-        self.assertEqual(first_response.status_code, 200)
-        self.assertEqual(second_response.status_code, 200)
         self.assertEqual(first_count, second_count)
 
 class DocumentIndexingTests(APITestCase):
@@ -615,22 +786,115 @@ class DocumentIndexingTests(APITestCase):
         )
         client.close.assert_called_once()
 
-    @patch("documents.views.process_document_indexing")
-    def test_indexing_api(self, mock_process):
+    @patch("documents.services.indexing.delete_points")
+    @patch("documents.services.indexing.get_document_point_ids")
+    @patch("documents.services.indexing.get_qdrant_client")
+    @patch("documents.services.indexing.embed_texts")
+    def test_partial_indexing_failure_attempts_qdrant_cleanup(
+        self,
+        mock_embed_texts,
+        mock_get_client,
+        mock_get_point_ids,
+        mock_delete_points,
+    ):
         document = self.create_chunked_document()
-        document.indexing_status = IndexingStatus.READY
-        document.indexed_chunk_count = 2
-        mock_process.return_value = document
+        client = MagicMock()
+        mock_get_client.return_value = client
+        mock_get_point_ids.side_effect = [["old-point"], ["partial-point"]]
+        mock_embed_texts.side_effect = RuntimeError("embedding failed")
 
-        response = self.client.post(
-            f"/api/documents/{document.id}/index/"
+        with patch("documents.services.indexing.ensure_collection"):
+            with self.assertRaisesRegex(RuntimeError, "embedding failed"):
+                process_document_indexing(document.pk)
+
+        mock_delete_points.assert_called_once_with(
+            client,
+            ["partial-point"],
+        )
+        document.refresh_from_db()
+        self.assertEqual(document.status, DocumentStatus.FAILED)
+        self.assertEqual(document.indexed_chunk_count, 0)
+
+class ExternalClientHardeningTests(SimpleTestCase):
+    @override_settings(
+        QDRANT_MAX_ATTEMPTS=2,
+        QDRANT_RETRY_DELAY_SECONDS=0,
+    )
+    def test_qdrant_retry_retries_transport_failures(self):
+        operation = MagicMock(
+            side_effect=[
+                httpx.ConnectError("temporary failure"),
+                "success",
+            ]
         )
 
-        self.assertEqual(response.status_code, 200)
+        with patch("documents.services.vector_store.time.sleep"):
+            result = _retry(operation, "argument")
+
+        self.assertEqual(result, "success")
+        self.assertEqual(operation.call_count, 2)
+
+    @override_settings(
+        QDRANT_URL="http://qdrant.test",
+        QDRANT_API_KEY="test-key",
+        QDRANT_TIMEOUT_SECONDS=7,
+    )
+    @patch("documents.services.vector_store.QdrantClient")
+    def test_qdrant_client_receives_timeout(self, mock_client):
+        get_qdrant_client()
+
+        mock_client.assert_called_once_with(
+            url="http://qdrant.test",
+            api_key="test-key",
+            timeout=7,
+        )
+
+    @override_settings(
+        OPENROUTER_API_KEY="test-key",
+        OPENROUTER_BASE_URL="https://openrouter.test/api/v1",
+        OPENROUTER_TIMEOUT_SECONDS=13,
+        OPENROUTER_MAX_RETRIES=4,
+    )
+    @patch("documents.services.llm.OpenAI")
+    def test_openrouter_client_receives_timeout_and_retry_count(
+        self,
+        mock_client,
+    ):
+        get_llm_client.cache_clear()
+        try:
+            get_llm_client()
+        finally:
+            get_llm_client.cache_clear()
+
+        mock_client.assert_called_once_with(
+            base_url="https://openrouter.test/api/v1",
+            api_key="test-key",
+            timeout=13,
+            max_retries=4,
+        )
+
+    @patch("documents.services.vector_store.get_qdrant_client")
+    def test_document_vector_cleanup_uses_payload_filter(
+        self,
+        mock_get_client,
+    ):
+        client = MagicMock()
+        client.collection_exists.return_value = True
+        mock_get_client.return_value = client
+
+        delete_document_points(42)
+
+        selector = client.delete.call_args.kwargs["points_selector"]
         self.assertEqual(
-            response.data["indexing_status"],
-            IndexingStatus.READY,
+            selector.filter.must[0].key,
+            "document_id",
         )
+        self.assertEqual(
+            selector.filter.must[0].match.value,
+            42,
+        )
+        client.close.assert_called_once()
+
 
 class RetrievalServiceTests(SimpleTestCase):
 
@@ -1434,6 +1698,34 @@ class RetrievalEvaluationTests(
             0.5,
         )
 
+    def test_precision_at_k_uses_requested_k_as_denominator(self):
+        score = calculate_precision_at_k(
+            expected_chunk_ids=[10],
+            retrieved_chunk_ids=[10, 20],
+            k=5,
+        )
+
+        self.assertEqual(score, 0.2)
+
+    def test_hit_rate_at_k(self):
+        self.assertEqual(
+            calculate_hit_rate_at_k(
+                expected_chunk_ids=[10, 20],
+                retrieved_chunk_ids=[30, 20, 40],
+                k=2,
+            ),
+            1.0,
+        )
+
+    def test_ndcg_at_k_rewards_relevant_chunks_at_higher_ranks(self):
+        score = calculate_ndcg_at_k(
+            expected_chunk_ids=[10, 20],
+            retrieved_chunk_ids=[10, 30, 20],
+            k=3,
+        )
+
+        self.assertAlmostEqual(score, 0.9197207891481876)
+
 class RerankerTests(
     SimpleTestCase
 ):
@@ -1997,6 +2289,161 @@ class RetrievalDatasetEvaluationTests(
                 evaluate_retrieval_dataset(
                     dataset_path=dataset_path,
                 )
+
+
+class Phase10EvaluationTests(SimpleTestCase):
+
+    def test_evaluates_pipeline_metrics_citations_and_usage(self):
+        dataset = [
+            {
+                "id": 1,
+                "question": "What is RAG?",
+                "expected_chunk_ids": [1],
+                "reference_answer": "RAG retrieves relevant context.",
+                "expected_citations": [1],
+            }
+        ]
+        result = [
+            {
+                "chunk_id": 1,
+                "document_id": 2,
+                "document_title": "Test",
+                "page_number": 1,
+                "content": "RAG retrieves relevant context.",
+            }
+        ]
+        usage = {
+            "prompt_tokens": 2,
+            "completion_tokens": 3,
+            "total_tokens": 5,
+            "cost_usd": 0.01,
+        }
+        judge_scores = {
+            strategy: {
+                "correctness": 1.0,
+                "relevance": 0.9,
+                "faithfulness": 1.0,
+                "rationale": "Supported by the context.",
+            }
+            for strategy in ("A", "B", "C", "D", "E")
+        }
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "documents.services.retrieval_evaluation.search_similar_chunks",
+                return_value=result,
+            ),
+            patch(
+                "documents.services.retrieval_evaluation.search_hybrid_chunks",
+                return_value=result,
+            ),
+            patch(
+                "documents.services.retrieval_evaluation.rerank_results",
+                return_value=result,
+            ),
+            patch(
+                "documents.services.retrieval_evaluation.analyze_query_with_usage",
+                return_value=(
+                    SimpleNamespace(
+                        rewritten_query="RAG",
+                        expanded_queries=[],
+                    ),
+                    usage,
+                ),
+            ),
+            patch(
+                "documents.services.retrieval_evaluation.search_hybrid_multi_query",
+                return_value=result,
+            ),
+            patch(
+                "documents.services.retrieval_evaluation.expand_with_neighbors",
+                return_value=result,
+            ),
+            patch(
+                "documents.services.retrieval_evaluation.sort_context_results",
+                side_effect=lambda results: results,
+            ),
+            patch(
+                "documents.services.retrieval_evaluation.optimize_context",
+                side_effect=lambda results, **kwargs: results,
+            ),
+            patch(
+                "documents.services.retrieval_evaluation.generate_answer_with_usage",
+                side_effect=[
+                    ("A grounded answer [S1]", usage),
+                    ("A grounded answer [S1]", usage),
+                    ("Unsupported citation [S99]", usage),
+                    ("A grounded answer [S1]", usage),
+                    ("A grounded answer [S1]", usage),
+                ],
+            ),
+            patch(
+                "documents.services.retrieval_evaluation._judge_answers",
+                return_value=(
+                    judge_scores,
+                    {
+                        "prompt_tokens": 7,
+                        "completion_tokens": 1,
+                        "total_tokens": 8,
+                        "cost_usd": 0.02,
+                    },
+                ),
+            ),
+        ):
+            dataset_path = Path(directory) / "questions.json"
+            dataset_path.write_text(
+                json.dumps(dataset),
+                encoding="utf-8",
+            )
+            report = evaluate_phase_10_dataset(
+                dataset_path=dataset_path,
+                evaluate_answers=True,
+            )
+
+        self.assertEqual(report["strategies_run"], ["A", "B", "C", "D", "E"])
+        self.assertEqual(
+            report["averages"]["A"]["recall_at_5"],
+            1.0,
+        )
+        self.assertEqual(
+            report["averages"]["A"]["precision_at_5"],
+            0.2,
+        )
+        self.assertEqual(
+            report["averages"]["A"]["answer_relevance"],
+            0.9,
+        )
+        self.assertEqual(
+            report["averages"]["A"]["faithfulness"],
+            1.0,
+        )
+        self.assertEqual(
+            report["questions"][0]["strategies"]["A"]["citation_correct"],
+            True,
+        )
+        self.assertEqual(
+            report["questions"][0]["strategies"]["C"][
+                "invalid_citation_ids"
+            ],
+            ["S99"],
+        )
+        self.assertEqual(
+            report["questions"][0]["strategies"]["C"]["citation_precision"],
+            0.0,
+        )
+        self.assertEqual(
+            report["questions"][0]["strategies"]["C"]["citation_correct"],
+            False,
+        )
+        self.assertEqual(
+            report["openrouter_usage"]["total"]["total_tokens"],
+            38,
+        )
+        self.assertAlmostEqual(
+            report["openrouter_usage"]["total"]["cost_usd"],
+            0.08,
+        )
 
 class NeighborRetrievalTests(
     TestCase
