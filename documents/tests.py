@@ -31,6 +31,7 @@ from documents.services.retrieval_evaluation import (
 )
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.core.management import call_command, CommandError
+from django.contrib.auth import get_user_model
 from documents.services.reranker import rerank_results
 from documents.services.retrieval import search_similar_chunks
 from documents.services.indexing import process_document_indexing
@@ -55,7 +56,12 @@ from unittest.mock import patch, MagicMock
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from documents.models import Document, DocumentPage, DocumentStatus
+from documents.models import (
+    Document,
+    DocumentChatMessage,
+    DocumentPage,
+    DocumentStatus,
+)
 from documents.services.retrieval_quality import deduplicate_results, filter_by_score, limit_results, prepare_retrieval_results
 
 
@@ -1339,6 +1345,11 @@ class DocumentRAGAPITests(APITestCase):
         mock_search,
         mock_generate,
     ):
+        user = get_user_model().objects.create_user(
+            username="rag-user",
+            password="test-password",
+        )
+        self.client.force_authenticate(user=user)
         mock_rerank.side_effect = (
             lambda query, results, top_k: results[:top_k]
         )
@@ -1399,6 +1410,67 @@ class DocumentRAGAPITests(APITestCase):
         self.assertEqual(
             mock_search.call_args.kwargs["score_threshold"],
             0.30,
+        )
+
+    def test_document_scoped_rag_saves_and_returns_owned_chat_history(self):
+        user = get_user_model().objects.create_user(
+            username="chat-user",
+            password="test-password",
+        )
+        document = Document.objects.create(
+            owner=user,
+            title="Policy",
+            file="documents/policy.pdf",
+            file_type="pdf",
+            status=DocumentStatus.READY,
+            indexing_status=IndexingStatus.READY,
+        )
+        self.client.force_authenticate(user=user)
+        answer = {
+            "query": "What is the refund policy?",
+            "answer": "Refunds are available within 30 days.",
+            "sources": [],
+            "citations": {},
+            "retrieval": {},
+        }
+
+        with patch("documents.views.answer_question", return_value=answer):
+            response = self.client.post(
+                "/api/documents/rag/",
+                {
+                    "query": "What is the refund policy?",
+                    "document_id": document.pk,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        history_response = self.client.get(
+            f"/api/documents/{document.pk}/chat-history/"
+        )
+        self.assertEqual(history_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [(message["role"], message["content"]) for message in history_response.data],
+            [
+                ("user", "What is the refund policy?"),
+                ("assistant", "Refunds are available within 30 days."),
+            ],
+        )
+        self.assertEqual(
+            DocumentChatMessage.objects.filter(document=document).count(),
+            2,
+        )
+
+        other_user = get_user_model().objects.create_user(
+            username="other-chat-user",
+            password="test-password",
+        )
+        self.client.force_authenticate(user=other_user)
+        self.assertEqual(
+            self.client.get(
+                f"/api/documents/{document.pk}/chat-history/"
+            ).status_code,
+            status.HTTP_404_NOT_FOUND,
         )
 
 

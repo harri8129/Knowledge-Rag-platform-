@@ -9,12 +9,19 @@ from rest_framework import generics, status
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.db import transaction
 
-from documents.models import Document, DocumentPage, IndexingStatus
+from documents.models import (
+    Document,
+    DocumentChatMessage,
+    DocumentPage,
+    IndexingStatus,
+)
 from documents.models import DocumentStatus
 from documents.serializers import (
     DocumentSerializer,
     DocumentPageSerializer,
+    DocumentChatMessageSerializer,
     RetrievalRequestSerializer
 )
 from documents.services.retrieval import search_similar_chunks
@@ -207,6 +214,19 @@ class DocumentChunkListView(generics.ListAPIView):
             .order_by("chunk_index")
         )                  
 
+
+class DocumentChatHistoryView(generics.ListAPIView):
+    serializer_class = DocumentChatMessageSerializer
+
+    def get_queryset(self):
+        document = get_object_or_404(
+            Document,
+            pk=self.kwargs["pk"],
+            owner=self.request.user,
+        )
+        return DocumentChatMessage.objects.filter(document=document)
+
+
 class DocumentSearchView(APIView):
 
     @extend_schema(
@@ -377,6 +397,23 @@ class DocumentRAGView(APIView):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+        if document_id is not None:
+            with transaction.atomic():
+                DocumentChatMessage.objects.bulk_create(
+                    [
+                        DocumentChatMessage(
+                            document=document,
+                            role=DocumentChatMessage.Role.USER,
+                            content=query,
+                        ),
+                        DocumentChatMessage(
+                            document=document,
+                            role=DocumentChatMessage.Role.ASSISTANT,
+                            content=results["answer"],
+                        ),
+                    ]
+                )
 
         return Response(
             results,

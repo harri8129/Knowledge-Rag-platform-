@@ -5,6 +5,7 @@ from django.urls import path
 
 from .views import (
     DocumentDetailView,
+    DocumentChatHistoryView,
     DocumentListCreateView,
     DocumentPageListView,
     DocumentProcessView,
@@ -14,6 +15,7 @@ from .views import (
 urlpatterns = [
     path("", DocumentListCreateView.as_view(), name="document-list-create"),
     path("<int:pk>/", DocumentDetailView.as_view(), name="document-detail"),
+    path("<int:pk>/chat-history/", DocumentChatHistoryView.as_view(), name="document-chat-history"),
     path("<int:pk>/process/",DocumentProcessView.as_view(),name="document-process"),
     path("<int:pk>/retry/",DocumentRetryView.as_view(),name="document-retry"),
     path("<int:pk>/pages/",DocumentPageListView.as_view(),name="document=pages"),

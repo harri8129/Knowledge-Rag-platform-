@@ -2,7 +2,7 @@ from pathlib import Path
 from django.conf import settings
 from rest_framework import serializers
 
-from .models import Document,DocumentPage,DocumentChunk
+from .models import Document,DocumentPage,DocumentChunk,DocumentChatMessage
 
 
 class DocumentSerializer(serializers.ModelSerializer):
@@ -174,6 +174,14 @@ class DocumentChunkSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = fields
+
+
+class DocumentChatMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DocumentChatMessage
+        fields = ["id", "role", "content", "created_at"]
+        read_only_fields = fields
+
 
 class RetrievalRequestSerializer(serializers.Serializer):
     query = serializers.CharField(

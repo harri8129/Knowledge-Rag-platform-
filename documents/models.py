@@ -139,6 +139,28 @@ class DocumentChunk(models.Model):
     def __str__(self):
         return f"{self.document.title} - Chunk {self.chunk_index}"
 
+
+class DocumentChatMessage(models.Model):
+    class Role(models.TextChoices):
+        USER = "user", "User"
+        ASSISTANT = "assistant", "Assistant"
+
+    document = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="chat_messages",
+    )
+    role = models.CharField(max_length=10, choices=Role.choices)
+    content = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+
+    def __str__(self):
+        return f"{self.document.title} - {self.role}"
+
+
 class RetrievalEvaluation(models.Model):
     query = models.TextField()
 
