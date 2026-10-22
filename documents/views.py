@@ -399,6 +399,14 @@ class DocumentRAGView(APIView):
             )
 
         if document_id is not None:
+            cited_ids = set(
+                (results.get("citations") or {}).get("cited_sources", [])
+            )
+            cited_sources = [
+                source
+                for source in results.get("sources", [])
+                if source.get("source_id") in cited_ids
+            ]
             with transaction.atomic():
                 DocumentChatMessage.objects.bulk_create(
                     [
@@ -411,6 +419,7 @@ class DocumentRAGView(APIView):
                             document=document,
                             role=DocumentChatMessage.Role.ASSISTANT,
                             content=results["answer"],
+                            citations=cited_sources,
                         ),
                     ]
                 )

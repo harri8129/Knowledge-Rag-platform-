@@ -276,6 +276,11 @@ def answer_question(
                     "is_neighbor",
                     False,
                 ),
+                "content":source.get("content",""),
+                "score": source.get(
+                    "rerank_score",
+                    source.get("rrf_score",source.get("dense_score",0.0)),
+                ),
             }
         )
 

@@ -13,6 +13,14 @@ export const useDocuments = () => {
         queryKey: ['documents', user?.id],
         queryFn: listDocuments,
         enabled: Boolean(user?.id),
+        // Auto-refresh the document list while any document is still processing
+        refetchInterval: (query) => {
+            const docs = query.state.data ?? []
+            const anyNonTerminal = docs.some(
+                (d) => !TERMINAL.includes(d.status)
+            )
+            return anyNonTerminal ? 3000 : false
+        },
     })
 }
 

@@ -1428,9 +1428,22 @@ class DocumentRAGAPITests(APITestCase):
         self.client.force_authenticate(user=user)
         answer = {
             "query": "What is the refund policy?",
-            "answer": "Refunds are available within 30 days.",
-            "sources": [],
-            "citations": {},
+            "answer": "Refunds are available within 30 days [S1].",
+            "sources": [
+                {
+                    "source_id": "S1",
+                    "document_title": "Policy",
+                    "page_number": 2,
+                    "content": "Refunds are available within 30 days.",
+                },
+                {
+                    "source_id": "S2",
+                    "document_title": "Policy",
+                    "page_number": 3,
+                    "content": "Unused source.",
+                },
+            ],
+            "citations": {"cited_sources": ["S1"]},
             "retrieval": {},
         }
 
@@ -1453,8 +1466,12 @@ class DocumentRAGAPITests(APITestCase):
             [(message["role"], message["content"]) for message in history_response.data],
             [
                 ("user", "What is the refund policy?"),
-                ("assistant", "Refunds are available within 30 days."),
+                ("assistant", "Refunds are available within 30 days [S1]."),
             ],
+        )
+        self.assertEqual(
+            history_response.data[1]["citations"],
+            [answer["sources"][0]],
         )
         self.assertEqual(
             DocumentChatMessage.objects.filter(document=document).count(),

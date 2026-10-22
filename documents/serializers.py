@@ -179,7 +179,7 @@ class DocumentChunkSerializer(serializers.ModelSerializer):
 class DocumentChatMessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = DocumentChatMessage
-        fields = ["id", "role", "content", "created_at"]
+        fields = ["id", "role", "content", "citations", "created_at"]
         read_only_fields = fields
 
 

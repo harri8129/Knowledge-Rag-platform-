@@ -42,9 +42,19 @@ export function useChat() {
 
         try {
             const result = await mutateAsync({ query, top_k: 5, document_id: documentId || undefined })
-            setTargetMessages((prev) => prev.map((m) =>
-                m.id === aiId ? { ...m, content: result.answer, citations: result.citations ?? [], isLoading: false } : m
-            ))
+
+            // result.citations is the validation INFO object { cited_sources: ["S1", ...] }
+            // result.sources is the array of full source objects
+            const citedIds = new Set(result.citations?.cited_sources ?? [])
+            const citations = (result.sources ?? []).filter((s) => citedIds.has(s.source_id))
+
+            setTargetMessages((prev) =>
+                prev.map((m) =>
+                    m.id === aiId
+                        ? { ...m, content: result.answer, citations, isLoading: false }
+                        : m
+                )
+            )
             if (documentId !== null) {
                 queryClient.invalidateQueries({ queryKey: targetKey })
             }
