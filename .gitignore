@@ -31,3 +31,6 @@ qdrant_storage/
 .pytest_cache/
 .coverage
 htmlcov/
+
+
+.INTERVIEW_PREPARATION.txt

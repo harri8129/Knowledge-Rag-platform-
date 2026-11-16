@@ -5,6 +5,7 @@ from datetime import timedelta
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
+from documents.storage import DocumentS3Storage
 
 import httpx
 
@@ -66,6 +67,14 @@ from documents.services.retrieval_quality import deduplicate_results, filter_by_
 
 
 class DocumentAPITests(APITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.user = get_user_model().objects.create_user(
+            username="testuser_api",
+            password="testpassword123",
+        )
+        self.client.force_authenticate(user=self.user)
 
     def create_file(
         self,
@@ -302,8 +311,18 @@ class DocumentAPITests(APITestCase):
 
 
 class DocumentPipelineAPITests(APITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.user = get_user_model().objects.create_user(
+            username="testuser_pipeline",
+            password="testpassword123",
+        )
+        self.client.force_authenticate(user=self.user)
+
     def test_retry_endpoint_only_schedules_failed_documents(self):
         document = Document.objects.create(
+            owner=self.user,
             title="Failed",
             file_type="txt",
             status=DocumentStatus.FAILED,
@@ -322,6 +341,7 @@ class DocumentPipelineAPITests(APITestCase):
 
     def test_pipeline_submission_returns_service_unavailable_when_busy(self):
         document = Document.objects.create(
+            owner=self.user,
             title="Busy",
             file_type="txt",
             status=DocumentStatus.UPLOADED,
@@ -425,6 +445,14 @@ class StaleDocumentRecoveryTests(TestCase):
 
 
 class DocumentIngestionTests(APITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.user = get_user_model().objects.create_user(
+            username="testuser_ingest",
+            password="testpassword123",
+        )
+        self.client.force_authenticate(user=self.user)
 
     def upload_text_file(self,name="sample.txt",content=None):
         if content is None:
@@ -573,6 +601,14 @@ class TextSplittingTests(APITestCase):
 
 
 class DocumentChunkAPITests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = get_user_model().objects.create_user(
+            username="testuser_chunks",
+            password="testpassword123",
+        )
+        self.client.force_authenticate(user=self.user)
+
     def create_ready_document(self, content):
         uploaded = SimpleUploadedFile(
             "chunk-test.txt",
@@ -581,6 +617,7 @@ class DocumentChunkAPITests(APITestCase):
         )
 
         document = Document.objects.create(
+            owner=self.user,
             title="Chunk Test",
             file=uploaded,
             file_type="txt",
@@ -1016,6 +1053,14 @@ class RetrievalServiceTests(SimpleTestCase):
 
 class DocumentSearchAPITests(APITestCase):
 
+    def setUp(self):
+        super().setUp()
+        self.user = get_user_model().objects.create_user(
+            username="testuser_search",
+            password="testpassword123",
+        )
+        self.client.force_authenticate(user=self.user)
+
     def create_indexed_document(self):
         file = SimpleUploadedFile(
             "search-test.txt",
@@ -1024,6 +1069,7 @@ class DocumentSearchAPITests(APITestCase):
         )
 
         return Document.objects.create(
+            owner=self.user,
             title="Search Test",
             file=file,
             file_type="txt",
@@ -1091,6 +1137,7 @@ class DocumentSearchAPITests(APITestCase):
         )
 
         document = Document.objects.create(
+            owner=self.user,
             title="Not Indexed",
             file=file,
             file_type="txt",
@@ -2681,3 +2728,54 @@ class ContextOptimizerTests(
             len(optimized),
             2,
         )
+
+
+class DocumentS3StorageTests(TestCase):
+    def test_storage_class_attributes(self):
+        storage = DocumentS3Storage(bucket_name="test-bucket")
+        self.assertIsNone(storage.default_acl)
+        self.assertFalse(storage.file_overwrite)
+        self.assertTrue(storage.querystring_auth)
+    @override_settings(
+        USE_S3=True,
+        STORAGES={
+            "default": {
+                "BACKEND": "documents.storage.DocumentS3Storage",
+                "OPTIONS": {
+                    "bucket_name": "test-bucket",
+                    "access_key": "test-key",
+                    "secret_key": "test-secret",
+                    "region_name": "us-east-1",
+                    "querystring_auth": True,
+                },
+            },
+            "staticfiles": {
+                "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+            },
+        },
+    )
+    @patch("storages.backends.s3.S3Storage.exists", return_value=False)
+    @patch("storages.backends.s3.S3Storage._save")
+    def test_document_upload_routes_to_s3(self, mock_save, mock_exists):
+        mock_save.return_value = "documents/test.txt"
+        test_file = SimpleUploadedFile("test.txt", b"Test content for S3", content_type="text/plain")
+
+        doc = Document.objects.create(
+            title="Test Doc",
+            file=test_file,
+            file_type="txt",
+            status=DocumentStatus.UPLOADED,
+        )
+
+        self.assertTrue(mock_save.called)
+        self.assertEqual(doc.file.name, "documents/test.txt")
+    @patch("storages.backends.s3.S3Storage.delete")
+    def test_document_deletion_removes_s3_file(self, mock_delete):
+        doc = Document.objects.create(
+            title="Delete Doc",
+            file="documents/to_delete.pdf",
+            file_type="pdf",
+            status=DocumentStatus.READY,
+        )
+        doc.delete()
+        mock_delete.assert_called_once_with("documents/to_delete.pdf")

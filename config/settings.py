@@ -300,5 +300,46 @@ SPECTACULAR_SETTINGS = {
     },
 }
 
+
+# -----------------------------------------------------------------------
+# Storage & AWS S3 Configuration
+# -----------------------------------------------------------------------
+USE_S3 = os.getenv("USE_S3", "False").lower() == "true"
+
+if USE_S3:
+    # Use Django-storages S3 backend
+    STORAGES = {
+        "default": {
+            "BACKEND": "documents.storage.DocumentS3Storage",
+            "OPTIONS": {
+                "access_key": os.getenv("AWS_ACCESS_KEY_ID"),
+                "secret_key": os.getenv("AWS_SECRET_ACCESS_KEY"),
+                "bucket_name": os.getenv("AWS_STORAGE_BUCKET_NAME"),
+                "region_name": os.getenv("AWS_S3_REGION_NAME", "us-east-1"),
+                "endpoint_url": os.getenv("AWS_S3_ENDPOINT_URL") or None,
+                "default_acl": None,
+                "file_overwrite": False,
+                "querystring_auth": True,
+                "querystring_expire": int(os.getenv("AWS_QUERYSTRING_EXPIRE", "3600")),
+                "signature_version": "s3v4",
+            },
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+    #OPTIONAL s3 settings
+    AWS_S3_MAX_MEMORY_SIZE = 10 * 1024 * 1024 # 10MB memory buffer before spilling to temp file
+else:
+    #Local filesystem storage for offline development 
+    STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage"
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
