@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.venv
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+staticfiles/
+media/
+frontend/node_modules/
+.DS_Store

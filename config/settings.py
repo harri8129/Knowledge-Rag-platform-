@@ -110,7 +110,11 @@ SECRET_KEY = os.getenv(
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DEBUG", "False") == "True"
 
-ALLOWED_HOSTS = []
+# Allowed Hosts & CSRF from environment #prod
+ALLOWED_HOSTS = [host.strip() for host in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if host.strip()] #prod
+CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost").split(",") if origin.strip()] #prod
+# SSL Proxy Header (tells Django requests came through HTTPS via Nginx) #prod
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https") #prod
 
 
 # Application definition
@@ -212,8 +216,8 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
-STATIC_URL = 'static/'
-
+STATIC_URL = '/static/' # prod
+STATIC_ROOT = BASE_DIR / "staticfiles"  #prod
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
