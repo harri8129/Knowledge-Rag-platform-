@@ -26,7 +26,7 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     networks:
-      - rag-network
+      - rag_network
 
   django:
     build:
@@ -45,7 +45,7 @@ services:
       qdrant:
         condition: service_started
     networks:
-      - rag-network
+      - rag_network
 
   nginx:
     image: nginx:stable 
