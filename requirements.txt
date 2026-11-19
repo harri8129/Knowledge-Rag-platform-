@@ -25,6 +25,7 @@ flatbuffers==25.12.19
 fonttools==4.66.1
 fsspec==2026.9.0
 grpcio==1.84.0
+gunicorn==27.0.1
 h11==0.16.0
 h2==4.4.1
 hf-xet==1.6.0
